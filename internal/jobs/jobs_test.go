@@ -234,6 +234,34 @@ func TestQueueRunsAndSupersedes(t *testing.T) {
 	}
 }
 
+func TestClaimSerializesGroups(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	pass := func(n string) NewJob {
+		return NewJob{Kind: "k", GroupKey: "pr1:discussion", DedupeKey: "pr1@" + n, KeepRunning: true, Payload: n}
+	}
+	first, _, _, _ := s.Enqueue(ctx, pass("1"))
+	if got, err := s.Claim(ctx); err != nil || got.ID != first.ID {
+		t.Fatalf("Claim = %+v, %v", got, err)
+	}
+	second, _, _, _ := s.Enqueue(ctx, pass("2"))
+	other, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "pr2", DedupeKey: "pr2@1", Payload: 1})
+
+	// The second pass of pr1 waits; another group's job does not.
+	if got, err := s.Claim(ctx); err != nil || got == nil || got.ID != other.ID {
+		t.Fatalf("Claim = %+v, %v; want the other group's job", got, err)
+	}
+	if got, err := s.Claim(ctx); err != nil || got != nil {
+		t.Fatalf("Claim = %+v, %v; want nothing while pr1 runs", got, err)
+	}
+	if _, err := s.Finish(ctx, first.ID, Succeeded, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Claim(ctx); err != nil || got == nil || got.ID != second.ID {
+		t.Fatalf("Claim = %+v, %v; want the second pass once the first finished", got, err)
+	}
+}
+
 func TestKeepRunning(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

@@ -44,6 +44,8 @@ Everything else is a finding about a line you can point to.
 
 **If you cannot write the input that triggers the failure, it is not `blocking`.** Downgrade it to `important`, or ask it as a `question`. A concern about code you could not find is always a `question`, never a finding.
 
+That includes systems outside the repository: forges, cloud APIs, libraries, databases. You cannot read their code, so a finding that depends on how they behave is a `question`, unless the repository itself shows that behavior (its tests, vendored code or documentation).
+
 ## What to examine
 
 - **Correctness** — edge cases, off-by-one, nil/null handling, type coercion, races, error paths, resource cleanup

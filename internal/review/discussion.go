@@ -36,11 +36,11 @@ func isBot(user, login string) bool {
 	return strings.EqualFold(user, login)
 }
 
-// mentions reports whether body mentions the bot, as @<login> (without a
+// mentionPattern matches a mention of the bot, as @<login> (without a
 // [bot] suffix).
-func mentions(body, login string) bool {
+func mentionPattern(login string) *regexp.Regexp {
 	name := regexp.QuoteMeta(strings.TrimSuffix(login, "[bot]"))
-	return regexp.MustCompile(`(?i)(^|[^\w.-])@` + name + `($|[^\w-])`).MatchString(body)
+	return regexp.MustCompile(`(?i)(^|[^\w.-])@` + name + `($|[^\w-])`)
 }
 
 // answeredKeys returns the keys of the notes the bot already replied to.
@@ -102,6 +102,7 @@ func (a ask) askers() []string {
 // pending note of a thread.
 func pendingAsks(notes []forge.Note, login string) []ask {
 	answered := answeredKeys(notes, login)
+	mention := mentionPattern(login)
 	var asks []ask
 	for _, thread := range inlineThreads(notes) {
 		botJoined := false
@@ -111,7 +112,7 @@ func pendingAsks(notes []forge.Note, login string) []ask {
 				botJoined = true
 				continue
 			}
-			if !answered[n.Key()] && (botJoined || mentions(n.Body, login)) {
+			if !answered[n.Key()] && (botJoined || mention.MatchString(n.Body)) {
 				covered = append(covered, n)
 			}
 		}
@@ -120,7 +121,7 @@ func pendingAsks(notes []forge.Note, login string) []ask {
 		}
 	}
 	for _, n := range notes {
-		if n.Kind != forge.NoteInline && !isBot(n.User, login) && !answered[n.Key()] && mentions(n.Body, login) {
+		if n.Kind != forge.NoteInline && !isBot(n.User, login) && !answered[n.Key()] && mention.MatchString(n.Body) {
 			asks = append(asks, ask{thread: []forge.Note{n}, covered: []forge.Note{n}})
 		}
 	}

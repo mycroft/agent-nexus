@@ -30,11 +30,11 @@ func TestMentions(t *testing.T) {
 		"see foo/@agent-nexus":      true,
 		"no mention of agent-nexus": false,
 	} {
-		if got := mentions(body, bot); got != want {
+		if got := mentionPattern(bot).MatchString(body); got != want {
 			t.Errorf("mentions(%q) = %v, want %v", body, got, want)
 		}
 	}
-	if !mentions("hey @agent-nexus", "agent-nexus[bot]") {
+	if !mentionPattern("agent-nexus[bot]").MatchString("hey @agent-nexus") {
 		t.Error("a GitHub App is mentioned without its [bot] suffix")
 	}
 }

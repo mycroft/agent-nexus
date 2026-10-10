@@ -237,11 +237,14 @@ func supersede(ctx context.Context, tx *sql.Tx, group string, keepRunning bool, 
 }
 
 // Claim marks the oldest queued job as running and returns it, or nil
-// when the queue is empty.
+// when no job can start. A job waits while another job of its group is
+// running or posting, so jobs about one subject never run concurrently.
 func (s *Store) Claim(ctx context.Context) (*Job, error) {
 	job, err := scanJob(s.db.QueryRowContext(ctx, `UPDATE jobs
 		SET status = 'running', started_at = ?, attempts = attempts + 1
-		WHERE id = (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1)
+		WHERE id = (SELECT q.id FROM jobs q WHERE q.status = 'queued'
+			AND NOT EXISTS (SELECT 1 FROM jobs b WHERE b.group_key = q.group_key AND b.status IN ('running', 'posting'))
+			ORDER BY q.id LIMIT 1)
 		RETURNING `+jobColumns, formatTime(s.now())))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil //nolint:nilnil // an empty queue is not an error
