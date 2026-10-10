@@ -105,9 +105,12 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
 
 ### Gitea
 
-1. **Bot account.** Create an `agent-nexus` bot account and give it read
-   access to the repositories. Create a token with `write:repository`
-   scope and set `GITEA_USER` and `GITEA_TOKEN`.
+1. **Bot account.** Create an `agent-nexus` bot account (Site
+   Administration → User Accounts → Create, user type *Bot*) and give it
+   read access to the private repositories. From the bot's admin page,
+   create a token with `write:repository` scope (to fetch the code and post
+   reviews) and `read:user` scope (to look up its own login). Set
+   `GITEA_USER` and `GITEA_TOKEN`.
 2. **Actions secret.** Add a user-level Actions secret named
    `AGENT_NEXUS_API_KEY` with one of the `API_KEYS` values.
 3. **Scoped workflow.** Register
