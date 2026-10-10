@@ -65,6 +65,7 @@ type Draft struct {
 	FallbackBody string          `json:"fallback_body"`
 	Output       Output          `json:"output"`
 	Usage        llm.Usage       `json:"usage"`
+	PeakPrompt   int             `json:"peak_prompt_tokens"`
 	Turns        int             `json:"turns"`
 }
 
@@ -101,13 +102,14 @@ func (r *Reviewer) Handle(ctx context.Context, job *jobs.Job, run *jobs.Run) (jo
 	}
 	res := outcomeResult(outcome)
 	res.Data = map[string]any{
-		"outcome":           outcome,
-		"verdict":           draft.Output.Verdict,
-		"findings":          len(draft.Output.Findings),
-		"inline_comments":   len(draft.Review.Comments),
-		"prompt_tokens":     draft.Usage.PromptTokens,
-		"completion_tokens": draft.Usage.CompletionTokens,
-		"turns":             draft.Turns,
+		"outcome":            outcome,
+		"verdict":            draft.Output.Verdict,
+		"findings":           len(draft.Output.Findings),
+		"inline_comments":    len(draft.Review.Comments),
+		"prompt_tokens":      draft.Usage.PromptTokens,
+		"completion_tokens":  draft.Usage.CompletionTokens,
+		"peak_prompt_tokens": draft.PeakPrompt,
+		"turns":              draft.Turns,
 	}
 	return res, nil
 }
@@ -284,7 +286,8 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 	review, fallback := render(out, files, footer{
 		HeadSHA:          req.HeadSHA,
 		Model:            r.Model,
-		PromptTokens:     session.Usage.PromptTokens,
+		Turns:            session.Turns,
+		PeakPromptTokens: session.PeakPromptTokens,
 		CompletionTokens: session.Usage.CompletionTokens,
 		JobID:            jobID,
 	})
@@ -294,6 +297,7 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		FallbackBody: fallback,
 		Output:       out,
 		Usage:        session.Usage,
+		PeakPrompt:   session.PeakPromptTokens,
 		Turns:        session.Turns,
 	}, Drafted, nil
 }

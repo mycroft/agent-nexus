@@ -13,7 +13,8 @@ import (
 type footer struct {
 	HeadSHA          string
 	Model            string
-	PromptTokens     int
+	Turns            int
+	PeakPromptTokens int
 	CompletionTokens int
 	JobID            int64
 }
@@ -80,8 +81,8 @@ func renderBody(out Output, findings []Finding, inlined int, f footer) string {
 	if reason := strings.TrimSpace(out.VerdictReason); reason != "" {
 		fmt.Fprintf(&b, "\n%s\n", reason)
 	}
-	fmt.Fprintf(&b, "\n---\n<sub>agent-nexus · reviewed %s · %s · %d prompt + %d completion tokens · job %d</sub>\n%s\n",
-		short(f.HeadSHA), f.Model, f.PromptTokens, f.CompletionTokens, f.JobID, marker(f.HeadSHA))
+	fmt.Fprintf(&b, "\n---\n<sub>agent-nexus · reviewed %s · %s · %d turns · peak context %d tokens · %d tokens generated · job %d</sub>\n%s\n",
+		short(f.HeadSHA), f.Model, f.Turns, f.PeakPromptTokens, f.CompletionTokens, f.JobID, marker(f.HeadSHA))
 	return b.String()
 }
 

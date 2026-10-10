@@ -60,8 +60,13 @@ type Session struct {
 	tools    map[string]tools.Tool
 	defs     []llm.ToolDef
 	Messages []llm.Message
-	// Usage accumulates token counts over all calls.
+	// Usage accumulates token counts over all calls. Prompt tokens are
+	// counted again on every call, so their sum overstates the work when
+	// the server caches the shared prompt prefix.
 	Usage llm.Usage
+	// PeakPromptTokens is the largest prompt sent, i.e. the most context
+	// the conversation used.
+	PeakPromptTokens int
 	// Turns is the number of LLM calls made by Run.
 	Turns int
 	// TurnLimitReached is set when Run stopped at MaxTurns.
@@ -187,6 +192,7 @@ func (s *Session) complete(ctx context.Context, req llm.Request) (llm.Completion
 		}
 		s.Usage.PromptTokens += comp.Usage.PromptTokens
 		s.Usage.CompletionTokens += comp.Usage.CompletionTokens
+		s.PeakPromptTokens = max(s.PeakPromptTokens, comp.Usage.PromptTokens)
 		if comp.Usage.PromptTokens > 0 {
 			s.charsPerToken = float64(chars(s.Messages)) / float64(comp.Usage.PromptTokens)
 		}

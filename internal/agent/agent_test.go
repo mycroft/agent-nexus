@@ -97,6 +97,11 @@ func TestRunExecutesToolsUntilAnswer(t *testing.T) {
 	if s.Usage.PromptTokens == 0 || s.Usage.CompletionTokens != 20 || len(steps) != 2+1+3+1 {
 		t.Errorf("usage = %+v, steps = %d", s.Usage, len(steps))
 	}
+	// The second prompt holds the first plus the tool results: it is the
+	// peak, and smaller than the sum over both calls.
+	if second := chars(fake.requests[1].Messages) / 3; s.PeakPromptTokens != second || s.PeakPromptTokens >= s.Usage.PromptTokens {
+		t.Errorf("peak = %d, want %d (sum %d)", s.PeakPromptTokens, second, s.Usage.PromptTokens)
+	}
 }
 
 func TestRunStopsAtTurnLimit(t *testing.T) {

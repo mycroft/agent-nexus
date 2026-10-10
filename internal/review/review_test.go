@@ -177,7 +177,8 @@ func TestDraftAndPost(t *testing.T) {
 		t.Errorf("inline comments = %v (want blocking first)", inline)
 	}
 	body := draft.Review.Body
-	for _, want := range []string{"2 finding(s) posted as inline comments", "Are there callers", "- [x] Request changes", marker(f.remote.HeadSHA), "job 42"} {
+	for _, want := range []string{"2 finding(s) posted as inline comments", "Are there callers", "- [x] Request changes", marker(f.remote.HeadSHA),
+		"2 turns · peak context 1000 tokens · 150 tokens generated · job 42"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body lacks %q:\n%s", want, body)
 		}
