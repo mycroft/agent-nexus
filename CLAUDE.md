@@ -22,6 +22,10 @@ The flow is event → job → handler → agent → forge.
 - **`internal/review`:** the `pr_review` handler.
   - `Draft` gathers the PR, diff and base-branch `AGENTS.md`, runs the agent, then makes one final schema-constrained call.
   - `Post` is idempotent: it looks for the `<!-- agent-nexus:sha=… -->` marker before posting.
+- **`internal/review` (discussion):** the `pr_discussion` handler (`DiscussionHandler`). `POST /v1/events/pr-comment` queues one with `KeepRunning`, so a newer pass replaces a queued one and a running one finishes.
+  - `pendingAsks` finds human replies in threads the bot took part in, and mentions of `@agent-nexus`, that no reply marker covers.
+  - Answers follow `skills/pr-discussion`.
+  - `renderHistory` feeds the same discussion to later reviews.
 - **`internal/agent`:** the tool-calling loop. It records the transcript and elides old tool output as the conversation nears the context window.
 - **`internal/llm`:** a hand-rolled OpenAI-compatible client, with llama-server extras (`reasoning_content`, `chat_template_kwargs`, `/props`).
 - **`internal/gitrepo`:** a bare-repo cache plus a hardened git CLI wrapper. Nothing is ever checked out.
@@ -34,6 +38,7 @@ The flow is event → job → handler → agent → forge.
 - **Model input never becomes a git option.** It goes after `-e`, `--end-of-options` or `--`, or inside a `sha:path` with a path checked by `CleanPath`. Revisions are always SHAs that agent-nexus chose.
 - **Forge POSTs are never retried by the HTTP client.** A failed Gitea review can leave a pending review behind. `Post` deletes it and checks for the marker before trying again.
 - **Repository guidance comes from the base commit,** never the PR head.
+- **Never trust the triggering comment.** A discussion pass rescans the whole discussion. The bot's own notes never count as asks, which prevents loops, and every answer carries `<!-- agent-nexus:reply-to=<kind>:<id> -->` markers.
 - **Reviews are `COMMENT` unless the repository resolves to verdict mode.** See `resolveMode` in `internal/review/mode.go`: an exact central rule, then `.agent-nexus.yaml` on the base commit, then central patterns, then comment. `verdictEvent` downgrades a verdict that contradicts the findings, and `postAttempts` falls back to a comment if the forge refuses the verdict.
 
 ## Style

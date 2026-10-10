@@ -233,3 +233,26 @@ func TestQueueRunsAndSupersedes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestKeepRunning(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	pass := func(n string) NewJob {
+		return NewJob{Kind: "k", GroupKey: "g:discussion", DedupeKey: "g:discussion@" + n, KeepRunning: true, Payload: n}
+	}
+	running, _, _, _ := s.Enqueue(ctx, pass("1"))
+	if _, err := s.Claim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	queued, _, _, _ := s.Enqueue(ctx, pass("2"))
+	_, created, cancel, err := s.Enqueue(ctx, pass("3"))
+	if err != nil || !created || len(cancel) != 0 {
+		t.Fatalf("enqueue = %v, %v, cancel %v", created, err, cancel)
+	}
+	if got, _ := s.Get(ctx, running.ID); got.Status != Running {
+		t.Errorf("running job = %s, want it kept running", got.Status)
+	}
+	if got, _ := s.Get(ctx, queued.ID); got.Status != Superseded {
+		t.Errorf("queued job = %s, want superseded", got.Status)
+	}
+}

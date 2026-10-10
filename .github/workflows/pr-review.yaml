@@ -1,17 +1,22 @@
-# Reusable workflow for GitHub repositories: it asks agent-nexus to review
-# the calling pull request and exits; the review is posted later by the
-# agent-nexus GitHub App. Call it from a pull_request workflow:
+# Reusable workflow for GitHub repositories: it tells agent-nexus about pull
+# request activity and exits; the agent-nexus GitHub App posts its reviews
+# and answers later. Call it from a workflow triggered by pull requests and
+# comments:
 #
 #   on:
 #     pull_request:
 #       types: [opened, synchronize, reopened, ready_for_review]
+#     issue_comment:
+#       types: [created]
+#     pull_request_review_comment:
+#       types: [created]
 #   jobs:
-#     review:
-#       if: ${{ !github.event.pull_request.draft }}
+#     agent-nexus:
+#       if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
 #       uses: mycroft/agent-nexus/.github/workflows/pr-review.yaml@main
 #       secrets:
 #         AGENT_NEXUS_API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
-name: agent-nexus review
+name: agent-nexus
 
 on:
   workflow_call:
@@ -20,6 +25,10 @@ on:
         description: agent-nexus base URL
         type: string
         default: https://agent-nexus.services.mkz.me
+      bot:
+        description: Login of the agent-nexus App, whose own activity is ignored
+        type: string
+        default: agent-nexus[bot]
     secrets:
       AGENT_NEXUS_API_KEY:
         required: false
@@ -27,29 +36,38 @@ on:
 permissions: {}
 
 jobs:
-  request-review:
-    name: Request review
+  notify:
+    name: Notify agent-nexus
+    if: ${{ github.actor != inputs.bot && (github.event_name != 'issue_comment' || github.event.issue.pull_request) }}
     runs-on: ubuntu-latest
     steps:
-      - name: Send pull request event
+      - name: Send event
         env:
           ENDPOINT: ${{ inputs.endpoint }}
           API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
+          EVENT: ${{ github.event_name }}
           SERVER_URL: ${{ github.server_url }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # Pull requests from forks get no secrets.
           if [ -z "${API_KEY}" ]; then
-            echo "::warning::AGENT_NEXUS_API_KEY is not available; skipping the review request"
+            echo "::warning::AGENT_NEXUS_API_KEY is not available; skipping"
             exit 0
           fi
-          payload=$(jq -n --arg server_url "${SERVER_URL}" --arg repo "${REPO}" \
-            --argjson pr "${PR}" --arg head_sha "${HEAD_SHA}" \
-            '{server_url: $server_url, repo: $repo, pr: $pr, head_sha: $head_sha}')
+          if [ "${EVENT}" = "pull_request" ]; then
+            path=pr-review
+            payload=$(jq -n --arg server_url "${SERVER_URL}" --arg repo "${REPO}" \
+              --argjson pr "${PR}" --arg head_sha "${HEAD_SHA}" \
+              '{server_url: $server_url, repo: $repo, pr: $pr, head_sha: $head_sha}')
+          else
+            path=pr-comment
+            payload=$(jq -n --arg server_url "${SERVER_URL}" --arg repo "${REPO}" --argjson pr "${PR}" \
+              '{server_url: $server_url, repo: $repo, pr: $pr}')
+          fi
           curl -fsS --retry 3 --retry-connrefused --max-time 60 \
             -H "Authorization: Bearer ${API_KEY}" \
             -H "Content-Type: application/json" \
             --data "${payload}" \
-            "${ENDPOINT}/v1/events/pr-review"
+            "${ENDPOINT}/v1/events/${path}"

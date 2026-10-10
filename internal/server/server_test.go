@@ -40,6 +40,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *forgetest.Fake, *jobs.Store
 	log := slog.New(slog.DiscardHandler)
 	q := jobs.NewQueue(store, 1, time.Minute, time.Hour, log)
 	q.Register(review.Kind, noopHandler{})
+	q.Register(review.DiscussionKind, noopHandler{})
 
 	keys, err := auth.ParseKeys("test="+apiKey, 1000)
 	if err != nil {
@@ -58,8 +59,13 @@ func newTestServer(t *testing.T) (*httptest.Server, *forgetest.Fake, *jobs.Store
 
 func post(t *testing.T, srv *httptest.Server, key string, body any) (int, map[string]any) {
 	t.Helper()
+	return postTo(t, srv, "/v1/events/pr-review", key, body)
+}
+
+func postTo(t *testing.T, srv *httptest.Server, path, key string, body any) (int, map[string]any) {
+	t.Helper()
 	raw, _ := json.Marshal(body)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/events/pr-review", strings.NewReader(string(raw)))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(string(raw)))
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
@@ -183,4 +189,62 @@ func TestGetJob(t *testing.T) {
 func jsonNumber(n int64) string {
 	raw, _ := json.Marshal(n)
 	return string(raw)
+}
+
+func TestPRCommentEvent(t *testing.T) {
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	comment := func(pr int) PREvent {
+		return PREvent{ServerURL: "https://git.example.com", Repo: "mycroft/repo", PR: pr}
+	}
+	if code, _ := postTo(t, srv, "/v1/events/pr-comment", "", comment(1)); code != http.StatusUnauthorized {
+		t.Errorf("no key → %d", code)
+	}
+	if code, body := postTo(t, srv, "/v1/events/pr-comment", apiKey, comment(3)); code != http.StatusOK || body["status"] != "ignored" {
+		t.Errorf("closed PR → %d %v", code, body)
+	}
+	if code, _ := postTo(t, srv, "/v1/events/pr-comment", apiKey, PREvent{ServerURL: "https://git.example.com", Repo: "someone/repo", PR: 1}); code != http.StatusForbidden {
+		t.Errorf("other owner → %d", code)
+	}
+
+	code, body := postTo(t, srv, "/v1/events/pr-comment", apiKey, comment(1))
+	if code != http.StatusAccepted {
+		t.Fatalf("comment → %d %v", code, body)
+	}
+	first := int64(body["job_id"].(float64))
+	job, err := store.Get(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload review.DiscussionRequest
+	_ = json.Unmarshal(job.Payload, &payload)
+	if job.Kind != review.DiscussionKind || job.GroupKey != "gitea:mycroft/repo#1:discussion" ||
+		payload != (review.DiscussionRequest{Forge: "gitea", Owner: "mycroft", Repo: "repo", PR: 1}) {
+		t.Errorf("job = %+v, payload = %+v", job, payload)
+	}
+
+	// A second comment queues a new pass, which replaces the queued one;
+	// the review of the same pull request is a different group.
+	if code, _ := post(t, srv, apiKey, event(1, head)); code != http.StatusAccepted {
+		t.Fatalf("review → %d", code)
+	}
+	if code, _ := postTo(t, srv, "/v1/events/pr-comment", apiKey, comment(1)); code != http.StatusAccepted {
+		t.Fatalf("second comment → %d", code)
+	}
+	if job, _ := store.Get(ctx, first); job.Status != jobs.Superseded {
+		t.Errorf("first pass status = %s, want superseded", job.Status)
+	}
+	var reviews int
+	for id := first + 1; ; id++ {
+		job, err := store.Get(ctx, id)
+		if err != nil {
+			break
+		}
+		if job.Kind == review.Kind && job.Status == jobs.Queued {
+			reviews++
+		}
+	}
+	if reviews != 1 {
+		t.Errorf("queued reviews = %d, want 1 (a comment must not supersede it)", reviews)
+	}
 }

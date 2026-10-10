@@ -124,6 +124,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err != nil {
 		return nil, err
 	}
+	discussionSkill, err := skill.Load(skillFS, "pr-discussion")
+	if err != nil {
+		return nil, err
+	}
 	modeRules, err := review.ParseModeRules(cfg.ReviewModes)
 	if err != nil {
 		return nil, fmt.Errorf("REVIEW_MODES: %w", err)
@@ -133,15 +137,16 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		return nil, err
 	}
 	a.reviewer = &review.Reviewer{
-		Forges:        byName,
-		Repos:         repos,
-		LLM:           client,
-		Model:         cfg.LLMModel,
-		Skill:         prSkill,
-		ContextTokens: contextTokens,
-		MaxTurns:      cfg.AgentMaxTurns,
-		ModeRules:     modeRules,
-		Logger:        log,
+		Forges:          byName,
+		Repos:           repos,
+		LLM:             client,
+		Model:           cfg.LLMModel,
+		Skill:           prSkill,
+		DiscussionSkill: discussionSkill,
+		ContextTokens:   contextTokens,
+		MaxTurns:        cfg.AgentMaxTurns,
+		ModeRules:       modeRules,
+		Logger:          log,
 	}
 	return a, nil
 }
@@ -178,6 +183,7 @@ func serve() error {
 	defer store.Close()
 	queue := jobs.NewQueue(store, cfg.LLMConcurrency, cfg.JobTimeout, cfg.TranscriptRetention, log)
 	queue.Register(review.Kind, a.reviewer)
+	queue.Register(review.DiscussionKind, a.reviewer.DiscussionHandler())
 
 	api := &server.Server{Queue: queue, Forges: a.forges, AllowedOwners: cfg.AllowedOwners, Keys: keys, Logger: log}
 	apiServer := &http.Server{

@@ -65,9 +65,12 @@ type NewJob struct {
 	// a new job supersedes the group's older unfinished jobs.
 	GroupKey string
 	// DedupeKey identifies identical work (e.g. one pull request commit).
-	DedupeKey  string
-	APIKeyName string
-	Payload    any
+	DedupeKey string
+	// KeepRunning limits superseding to queued jobs: a running job of the
+	// group finishes.
+	KeepRunning bool
+	APIKeyName  string
+	Payload     any
 }
 
 // Step is one transcript entry of a job.
@@ -187,7 +190,7 @@ func (s *Store) Enqueue(ctx context.Context, nj NewJob) (Job, bool, []int64, err
 	}
 
 	now := s.now()
-	cancel, err := supersede(ctx, tx, nj.GroupKey, now)
+	cancel, err := supersede(ctx, tx, nj.GroupKey, nj.KeepRunning, now)
 	if err != nil {
 		return Job{}, false, nil, err
 	}
@@ -205,12 +208,13 @@ func (s *Store) Enqueue(ctx context.Context, nj NewJob) (Job, bool, []int64, err
 	return job, true, cancel, nil
 }
 
-// supersede marks the group's queued and running jobs superseded and
-// returns the IDs of those that had started.
-func supersede(ctx context.Context, tx *sql.Tx, group string, now time.Time) ([]int64, error) {
+// supersede marks the group's queued jobs, and running ones unless
+// keepRunning, superseded. It returns the IDs of those that had started.
+func supersede(ctx context.Context, tx *sql.Tx, group string, keepRunning bool, now time.Time) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx, `UPDATE jobs SET status = 'superseded', finished_at = ?
-		WHERE group_key = ? AND status IN ('queued', 'running') RETURNING id, (started_at IS NOT NULL)`,
-		formatTime(now), group)
+		WHERE group_key = ? AND (status = 'queued' OR (status = 'running' AND NOT ?))
+		RETURNING id, (started_at IS NOT NULL)`,
+		formatTime(now), group, keepRunning)
 	if err != nil {
 		return nil, fmt.Errorf("supersede older jobs: %w", err)
 	}

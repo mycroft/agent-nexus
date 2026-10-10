@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
 	"github.com/mycroft/agent-nexus/internal/httpclient"
@@ -98,28 +99,123 @@ func (g *Gitea) GetPR(ctx context.Context, repo Repo, number int) (PR, error) {
 	}, nil
 }
 
-// ListReviews implements Forge.
-func (g *Gitea) ListReviews(ctx context.Context, repo Repo, number int) ([]Review, error) {
-	var all []Review
+type giteaReview struct {
+	ID            int64     `json:"id"`
+	User          giteaUser `json:"user"`
+	Body          string    `json:"body"`
+	State         string    `json:"state"`
+	CommitID      string    `json:"commit_id"`
+	CommentsCount int       `json:"comments_count"`
+	SubmittedAt   time.Time `json:"submitted_at"`
+}
+
+func (g *Gitea) listReviews(ctx context.Context, repo Repo, number int) ([]giteaReview, error) {
+	var all []giteaReview
 	for page := 1; ; page++ {
-		var reviews []struct {
-			ID       int64     `json:"id"`
-			User     giteaUser `json:"user"`
-			Body     string    `json:"body"`
-			State    string    `json:"state"`
-			CommitID string    `json:"commit_id"`
-		}
+		var reviews []giteaReview
 		path := fmt.Sprintf("/repos/%s/pulls/%d/reviews?page=%d&limit=%d", repo, number, page, giteaPageSize)
 		if err := g.api.do(ctx, http.MethodGet, path, g.auth, nil, &reviews); err != nil {
 			return nil, fmt.Errorf("gitea: %w", err)
 		}
-		for _, r := range reviews {
-			all = append(all, Review{ID: r.ID, User: r.User.Login, Body: r.Body, State: r.State, CommitID: r.CommitID})
-		}
+		all = append(all, reviews...)
 		if len(reviews) < giteaPageSize {
 			return all, nil
 		}
 	}
+}
+
+// ListReviews implements Forge.
+func (g *Gitea) ListReviews(ctx context.Context, repo Repo, number int) ([]Review, error) {
+	reviews, err := g.listReviews(ctx, repo, number)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]Review, 0, len(reviews))
+	for _, r := range reviews {
+		all = append(all, Review{ID: r.ID, User: r.User.Login, Body: r.Body, State: r.State, CommitID: r.CommitID})
+	}
+	return all, nil
+}
+
+// ListNotes implements Forge. Gitea stores a reply to an inline comment
+// in the same review, on the same path and line, so those three identify
+// a thread.
+func (g *Gitea) ListNotes(ctx context.Context, repo Repo, number int) ([]Note, error) {
+	reviews, err := g.listReviews(ctx, repo, number)
+	if err != nil {
+		return nil, err
+	}
+	var notes []Note
+	for _, r := range reviews {
+		if r.State == "PENDING" {
+			continue
+		}
+		if strings.TrimSpace(r.Body) != "" {
+			notes = append(notes, Note{Kind: NoteReview, ID: r.ID, User: r.User.Login, Body: r.Body, CreatedAt: r.SubmittedAt})
+		}
+		if r.CommentsCount == 0 {
+			continue
+		}
+		var comments []struct {
+			ID               int64     `json:"id"`
+			User             giteaUser `json:"user"`
+			Body             string    `json:"body"`
+			Path             string    `json:"path"`
+			Position         int       `json:"position"`
+			OriginalPosition int       `json:"original_position"`
+			CreatedAt        time.Time `json:"created_at"`
+		}
+		path := fmt.Sprintf("/repos/%s/pulls/%d/reviews/%d/comments", repo, number, r.ID)
+		if err := g.api.do(ctx, http.MethodGet, path, g.auth, nil, &comments); err != nil {
+			return nil, fmt.Errorf("gitea: %w", err)
+		}
+		for _, c := range comments {
+			// position is the new-side line; original_position the
+			// old-side one, for comments on removed lines.
+			side := c.Position
+			if side == 0 {
+				side = -c.OriginalPosition
+			}
+			notes = append(notes, Note{
+				Kind: NoteInline, ID: c.ID, User: c.User.Login, Body: c.Body,
+				Path: c.Path, Line: c.Position,
+				Thread:    fmt.Sprintf("%d:%s:%d", r.ID, c.Path, side),
+				CreatedAt: c.CreatedAt,
+			})
+		}
+	}
+	var comments []struct {
+		ID        int64     `json:"id"`
+		User      giteaUser `json:"user"`
+		Body      string    `json:"body"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number), g.auth, nil, &comments); err != nil {
+		return nil, fmt.Errorf("gitea: %w", err)
+	}
+	for _, c := range comments {
+		notes = append(notes, Note{Kind: NoteComment, ID: c.ID, User: c.User.Login, Body: c.Body, CreatedAt: c.CreatedAt})
+	}
+	sortNotes(notes)
+	return notes, nil
+}
+
+// ReplyInline implements Forge.
+func (g *Gitea) ReplyInline(ctx context.Context, repo Repo, number int, root Note, body string) error {
+	path := fmt.Sprintf("/repos/%s/pulls/%d/comments/%d/replies", repo, number, root.ID)
+	if err := g.api.do(ctx, http.MethodPost, path, g.auth, map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("gitea: reply to comment %d: %w", root.ID, err)
+	}
+	return nil
+}
+
+// Comment implements Forge. It needs the write:issue token scope.
+func (g *Gitea) Comment(ctx context.Context, repo Repo, number int, body string) error {
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number)
+	if err := g.api.do(ctx, http.MethodPost, path, g.auth, map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("gitea: comment: %w", err)
+	}
+	return nil
 }
 
 // DeletePendingReviews implements Forge. A failed review submission on

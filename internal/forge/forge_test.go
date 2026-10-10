@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -265,5 +266,117 @@ func TestGitHubAppAuth(t *testing.T) {
 func TestGitHubRejectsBadKey(t *testing.T) {
 	if _, err := NewGitHub("https://api.github.com", "https://github.com", 1, "not a key"); err == nil {
 		t.Error("NewGitHub accepted a non-PEM key")
+	}
+}
+
+func TestGiteaNotes(t *testing.T) {
+	var replied, commented map[string]any
+	var repliedPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[
+			{"id":1,"user":{"login":"agent-nexus"},"state":"COMMENT","body":"## Summary","comments_count":1,"submitted_at":"2026-01-01T00:00:01Z"},
+			{"id":2,"user":{"login":"agent-nexus"},"state":"PENDING","body":"draft","comments_count":1,"submitted_at":"2026-01-01T00:00:02Z"},
+			{"id":3,"user":{"login":"alice"},"state":"APPROVED","body":"","comments_count":0,"submitted_at":"2026-01-01T00:00:09Z"}]`)
+	})
+	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews/1/comments", func(w http.ResponseWriter, _ *http.Request) {
+		// A finding, the reply stored in the same review on the same
+		// line, and a finding on a removed line.
+		_, _ = io.WriteString(w, `[
+			{"id":10,"user":{"login":"agent-nexus"},"body":"finding","path":"a.go","position":12,"original_position":0,"created_at":"2026-01-01T00:00:01Z"},
+			{"id":12,"user":{"login":"alice"},"body":"reply","path":"a.go","position":12,"original_position":0,"created_at":"2026-01-01T00:00:05Z"},
+			{"id":11,"user":{"login":"agent-nexus"},"body":"old side","path":"a.go","position":0,"original_position":12,"created_at":"2026-01-01T00:00:01Z"}]`)
+	})
+	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews/2/comments", func(http.ResponseWriter, *http.Request) {
+		t.Error("comments of a pending review were fetched")
+	})
+	mux.HandleFunc("GET /api/v1/repos/o/r/issues/3/comments", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":20,"user":{"login":"bob"},"body":"@agent-nexus hi","created_at":"2026-01-01T00:00:03Z"}]`)
+	})
+	mux.HandleFunc("POST /api/v1/repos/o/r/pulls/3/comments/{id}/replies", func(w http.ResponseWriter, r *http.Request) {
+		repliedPath = r.PathValue("id")
+		_ = json.NewDecoder(r.Body).Decode(&replied)
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("POST /api/v1/repos/o/r/issues/3/comments", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&commented)
+		w.WriteHeader(http.StatusCreated)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	g := NewGitea(srv.URL, "agent-nexus", "tok", fastRetry)
+	ctx := context.Background()
+	repo := Repo{Owner: "o", Name: "r"}
+	notes, err := g.ListNotes(ctx, repo, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, n := range notes {
+		got = append(got, fmt.Sprintf("%s/%s/%s/%d", n.Key(), n.User, n.Thread, n.Line))
+	}
+	want := "review:1/agent-nexus//0,inline:10/agent-nexus/1:a.go:12/12,inline:11/agent-nexus/1:a.go:-12/0,comment:20/bob//0,inline:12/alice/1:a.go:12/12"
+	if strings.Join(got, ",") != want {
+		t.Errorf("notes =\n%s\nwant\n%s", strings.Join(got, ","), want)
+	}
+
+	if err := g.ReplyInline(ctx, repo, 3, notes[1], "answer"); err != nil {
+		t.Fatal(err)
+	}
+	if repliedPath != "10" || replied["body"] != "answer" {
+		t.Errorf("reply to %s with %v", repliedPath, replied)
+	}
+	if err := g.Comment(ctx, repo, 3, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if commented["body"] != "hello" {
+		t.Errorf("comment = %v", commented)
+	}
+}
+
+func TestGitHubNotes(t *testing.T) {
+	_, pemKey := testKey(t)
+	var repliedTo string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/o/r/installation", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":99}`)
+	})
+	mux.HandleFunc("POST /app/installations/99/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"token":"inst","expires_at":"2099-01-01T00:00:00Z"}`)
+	})
+	mux.HandleFunc("GET /repos/o/r/pulls/5/reviews", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":1,"user":{"login":"agent-nexus[bot]"},"state":"COMMENTED","body":"summary","submitted_at":"2026-01-01T00:00:01Z"}]`)
+	})
+	mux.HandleFunc("GET /repos/o/r/pulls/5/comments", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[
+			{"id":10,"user":{"login":"agent-nexus[bot]"},"body":"finding","path":"a.go","line":3,"created_at":"2026-01-01T00:00:01Z"},
+			{"id":11,"user":{"login":"alice"},"body":"reply","path":"a.go","line":3,"in_reply_to_id":10,"created_at":"2026-01-01T00:00:02Z"}]`)
+	})
+	mux.HandleFunc("GET /repos/o/r/issues/5/comments", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[]`)
+	})
+	mux.HandleFunc("POST /repos/o/r/pulls/5/comments/{id}/replies", func(w http.ResponseWriter, r *http.Request) {
+		repliedTo = r.PathValue("id")
+		w.WriteHeader(http.StatusCreated)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	g, err := NewGitHub(srv.URL, "https://github.com", 42, pemKey, fastRetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	repo := Repo{Owner: "o", Name: "r"}
+	notes, err := g.ListNotes(ctx, repo, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 3 || notes[1].Thread != "10" || notes[2].Thread != "10" || notes[2].User != "alice" {
+		t.Fatalf("notes = %+v", notes)
+	}
+	if err := g.ReplyInline(ctx, repo, 5, notes[1], "answer"); err != nil || repliedTo != "10" {
+		t.Errorf("reply to %q: %v", repliedTo, err)
 	}
 }
