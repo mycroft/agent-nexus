@@ -21,6 +21,15 @@ Create a default fully qualified app name, truncated to 63 characters.
 {{- end }}
 {{- end }}
 
+{{/*
+Name of the headless Service governing the StatefulSet. The base is cut to
+54 characters so the suffix always fits the 63-character limit: cutting the
+whole name instead could drop the suffix and collide with the main Service.
+*/}}
+{{- define "agent-nexus.headlessName" -}}
+{{- printf "%s-headless" (include "agent-nexus.fullname" . | trunc 54 | trimSuffix "-") }}
+{{- end }}
+
 {{- define "agent-nexus.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}

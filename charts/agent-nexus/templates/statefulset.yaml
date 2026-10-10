@@ -8,7 +8,7 @@ metadata:
 spec:
   # The SQLite job store has a single writer: never more than one pod.
   replicas: 1
-  serviceName: {{ include "agent-nexus.fullname" . }}-headless
+  serviceName: {{ include "agent-nexus.headlessName" . }}
   selector:
     matchLabels:
       {{- include "agent-nexus.selectorLabels" . | nindent 6 }}
