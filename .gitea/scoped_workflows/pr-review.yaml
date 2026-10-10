@@ -1,26 +1,37 @@
 # Scoped workflow: registered once under User Settings → Actions → Scoped
 # Workflows, it runs on every repository of the owner (repositories can opt
-# out). It asks agent-nexus to review the pull request and exits; the
-# review is posted later by the agent-nexus bot.
+# out). It tells agent-nexus about pull request activity and exits; the
+# bot posts its reviews and answers later.
 #
 # Requires the user-level Actions secret AGENT_NEXUS_API_KEY.
-name: agent-nexus review
+name: agent-nexus
 
 on:
   pull_request:
     # Gitea has no ready_for_review: leaving draft (WIP) fires "edited".
     # Title-only edits are deduplicated by agent-nexus.
     types: [opened, synchronize, reopened, edited]
+  # Replies and mentions: agent-nexus answers replies in its own review
+  # threads, and comments mentioning @agent-nexus. Gitea reports a reply in
+  # a review thread as an issue_comment.
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+env:
+  ENDPOINT: https://agent-nexus.services.mkz.me
 
 jobs:
   request-review:
     name: Request review
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - name: Send pull request event
         env:
-          ENDPOINT: https://agent-nexus.services.mkz.me
           API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
           SERVER_URL: ${{ github.server_url }}
           REPO: ${{ github.repository }}
@@ -39,3 +50,31 @@ jobs:
             -H "Content-Type: application/json" \
             --data "${payload}" \
             "${ENDPOINT}/v1/events/pr-review"
+
+  request-reply:
+    name: Request reply
+    # The bot's own reviews and answers fire these events too. agent-nexus
+    # decides which comments need an answer.
+    if: >-
+      ${{ github.event_name != 'pull_request' && github.actor != 'agent-nexus'
+      && (github.event_name != 'issue_comment' || github.event.issue.pull_request) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send pull request comment event
+        env:
+          API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          if [ -z "${API_KEY}" ]; then
+            echo "::warning::AGENT_NEXUS_API_KEY is not set; skipping the reply request"
+            exit 0
+          fi
+          payload=$(jq -n --arg server_url "${SERVER_URL}" --arg repo "${REPO}" --argjson pr "${PR}" \
+            '{server_url: $server_url, repo: $repo, pr: $pr}')
+          curl -fsS --retry 3 --retry-connrefused --max-time 60 \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data "${payload}" \
+            "${ENDPOINT}/v1/events/pr-comment"
