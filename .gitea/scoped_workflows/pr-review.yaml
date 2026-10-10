@@ -1,0 +1,41 @@
+# Scoped workflow: registered once under User Settings → Actions → Scoped
+# Workflows, it runs on every repository of the owner (repositories can opt
+# out). It asks agent-nexus to review the pull request and exits; the
+# review is posted later by the agent-nexus bot.
+#
+# Requires the user-level Actions secret AGENT_NEXUS_API_KEY.
+name: agent-nexus review
+
+on:
+  pull_request:
+    # Gitea has no ready_for_review: leaving draft (WIP) fires "edited".
+    # Title-only edits are deduplicated by agent-nexus.
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  request-review:
+    name: Request review
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send pull request event
+        env:
+          ENDPOINT: https://agent-nexus.services.mkz.me
+          API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -z "${API_KEY}" ]; then
+            echo "::warning::AGENT_NEXUS_API_KEY is not set; skipping the review request"
+            exit 0
+          fi
+          payload=$(jq -n --arg server_url "${SERVER_URL}" --arg repo "${REPO}" \
+            --argjson pr "${PR}" --arg head_sha "${HEAD_SHA}" \
+            '{server_url: $server_url, repo: $repo, pr: $pr, head_sha: $head_sha}')
+          curl -fsS --retry 3 --retry-connrefused --max-time 60 \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data "${payload}" \
+            "${ENDPOINT}/v1/events/pr-review"

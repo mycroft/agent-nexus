@@ -1,0 +1,68 @@
+name: Build image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  IMAGE: registry.mkz.me/mycroft/agent-nexus
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # A release tag vX.Y.Z publishes X.Y.Z, the tag k8s-home pins;
+      # main publishes latest. Every build also gets immutable sha- and
+      # build- tags.
+      - name: Compute version and tags
+        id: meta
+        shell: bash
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          short="${GITHUB_SHA::7}"
+          version="${short}"
+          tags=("${IMAGE}:sha-${short}" "${IMAGE}:build-${RUN_ID}")
+          case "${GITHUB_REF}" in
+            refs/tags/v*)
+              version="${GITHUB_REF#refs/tags/v}"
+              tags+=("${IMAGE}:${version}")
+              ;;
+            refs/heads/main)
+              tags+=("${IMAGE}:latest")
+              ;;
+          esac
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+          printf 'Publishing version %s as:\n' "${version}"
+          printf '  %s\n' "${tags[@]}"
+
+      - name: Log in to container registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: registry.mkz.me
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64
+          pull: true
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}

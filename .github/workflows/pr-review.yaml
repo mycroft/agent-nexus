@@ -1,0 +1,55 @@
+# Reusable workflow for GitHub repositories: it asks agent-nexus to review
+# the calling pull request and exits; the review is posted later by the
+# agent-nexus GitHub App. Call it from a pull_request workflow:
+#
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, ready_for_review]
+#   jobs:
+#     review:
+#       if: ${{ !github.event.pull_request.draft }}
+#       uses: mycroft/agent-nexus/.github/workflows/pr-review.yaml@main
+#       secrets:
+#         AGENT_NEXUS_API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
+name: agent-nexus review
+
+on:
+  workflow_call:
+    inputs:
+      endpoint:
+        description: agent-nexus base URL
+        type: string
+        default: https://agent-nexus.services.mkz.me
+    secrets:
+      AGENT_NEXUS_API_KEY:
+        required: false
+
+permissions: {}
+
+jobs:
+  request-review:
+    name: Request review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send pull request event
+        env:
+          ENDPOINT: ${{ inputs.endpoint }}
+          API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Pull requests from forks get no secrets.
+          if [ -z "${API_KEY}" ]; then
+            echo "::warning::AGENT_NEXUS_API_KEY is not available; skipping the review request"
+            exit 0
+          fi
+          payload=$(jq -n --arg server_url "${SERVER_URL}" --arg repo "${REPO}" \
+            --argjson pr "${PR}" --arg head_sha "${HEAD_SHA}" \
+            '{server_url: $server_url, repo: $repo, pr: $pr, head_sha: $head_sha}')
+          curl -fsS --retry 3 --retry-connrefused --max-time 60 \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data "${payload}" \
+            "${ENDPOINT}/v1/events/pr-review"
