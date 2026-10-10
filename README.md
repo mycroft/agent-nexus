@@ -92,6 +92,35 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
   calls and answers.
 - `GET /healthz` needs no key.
 
+## Deployment
+
+The Helm chart in [`charts/agent-nexus`](charts/agent-nexus) runs a
+single-replica StatefulSet. Its volume holds the SQLite job store and the
+repository cache. The pod runs as uid 65532 with a read-only root
+filesystem.
+
+```sh
+helm install agent-nexus oci://registry.mkz.me/mycroft/charts/agent-nexus \
+  --version 0.1.0 -f values.yaml
+```
+
+The chart needs an existing Secret, named by `existingSecret`, with these
+keys:
+
+- `api-keys` (required)
+- `llm-api-key` (optional)
+- `gitea-token` (when Gitea is enabled)
+- `github-app-private-key` (when GitHub is enabled)
+
+Everything else lives in [`values.yaml`](charts/agent-nexus/values.yaml).
+The chart fails to render when a required setting is missing.
+
+Pushing a `vX.Y.Z` tag releases both artifacts:
+
+- **Image:** `registry.mkz.me/mycroft/agent-nexus:X.Y.Z`
+- **Chart:** `oci://registry.mkz.me/mycroft/charts/agent-nexus` at version
+  `X.Y.Z`, whose appVersion points at that image.
+
 ## Setup
 
 ### llama-server
@@ -153,6 +182,7 @@ jobs:
 make test   # go test -race ./...
 make lint   # golangci-lint
 make build
+make helm-lint
 CONTAINER_TOOL=podman make docker-build
 ```
 

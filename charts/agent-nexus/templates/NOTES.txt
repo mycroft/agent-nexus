@@ -1,0 +1,18 @@
+agent-nexus is starting: it reviews pull requests of {{ join ", " .Values.allowedOwners }} on
+{{- if .Values.gitea.enabled }} {{ .Values.gitea.url }}{{ end }}
+{{- if and .Values.gitea.enabled .Values.github.enabled }} and{{ end }}
+{{- if .Values.github.enabled }} {{ .Values.github.serverURL }}{{ end }}.
+
+Workflows send events to:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/v1/events/pr-review
+{{- end }}
+{{- else }}
+  http://{{ include "agent-nexus.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/v1/events/pr-review
+{{- end }}
+with "Authorization: Bearer <key>", a key from the api-keys entry of the
+{{ .Values.existingSecret }} Secret.
+
+Inspect a job and its agent transcript:
+  GET /v1/jobs/<id> and /v1/jobs/<id>/steps (same key)

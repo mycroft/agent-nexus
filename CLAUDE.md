@@ -8,6 +8,8 @@ This file guides Claude Code when working in this repository.
 - `make lint` runs golangci-lint v2 with the strict `.golangci.yaml`, and `make vet` runs `go vet`. Run `golangci-lint fmt -c .golangci.yaml ./...` to fix imports.
 - `go run ./cmd/agent-nexus review -forge gitea -repo o/r -pr N -dry-run -transcript` runs one real review without posting it. It needs the LLM and forge env vars listed in README.md.
 - `CONTAINER_TOOL=podman make docker-build`. The local docker has no buildx.
+- `make helm-lint` lints `charts/agent-nexus` with each `ci/*-values.yaml`. The chart `fail`s on missing required values, so linting it with the defaults is expected to fail.
+- A `vX.Y.Z` tag releases the image (`build-image.yaml`) and the OCI chart (`release-chart.yaml`), both at version `X.Y.Z`.
 
 ## Architecture
 

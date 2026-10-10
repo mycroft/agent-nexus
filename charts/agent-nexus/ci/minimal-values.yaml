@@ -1,0 +1,10 @@
+# The smallest working configuration, for CI (helm lint, kubeconform).
+existingSecret: agent-nexus
+llm:
+  baseURL: https://llm.example.com/v1
+  model: test-model
+gitea:
+  enabled: true
+  url: https://gitea.example.com
+allowedOwners:
+  - mycroft

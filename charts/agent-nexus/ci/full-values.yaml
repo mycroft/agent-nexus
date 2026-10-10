@@ -1,0 +1,55 @@
+# Every optional feature turned on, for CI (helm lint, kubeconform).
+existingSecret: agent-nexus
+llm:
+  baseURL: https://llm.example.com/v1
+  model: test-model
+  contextTokens: 32768
+  concurrency: 2
+gitea:
+  enabled: true
+  url: https://gitea.example.com
+  user: agent-nexus
+github:
+  enabled: true
+  appID: "12345"
+allowedOwners:
+  - mycroft
+  - other
+extraEnv:
+  - name: SKILLS_DIR
+    value: /skills
+imagePullSecrets:
+  - name: registry-credentials
+podAnnotations:
+  example.com/annotation: "true"
+podLabels:
+  team: platform
+persistence:
+  size: 1Gi
+  storageClass: longhorn
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: agent-nexus.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: agent-nexus-example-com-tls
+      hosts:
+        - agent-nexus.example.com
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus
+  interval: 30s
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: platform
+    effect: NoSchedule

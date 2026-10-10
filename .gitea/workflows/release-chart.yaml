@@ -1,0 +1,44 @@
+name: Release chart
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CHART: charts/agent-nexus
+  REGISTRY: registry.mkz.me
+  REPOSITORY: oci://registry.mkz.me/mycroft/charts
+
+jobs:
+  publish:
+    name: Package and push chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v4.3.0
+
+      # The chart's version and appVersion follow the release tag, so it
+      # deploys the image built from the same tag by the image workflow.
+      - name: Package chart
+        id: package
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          helm package "${CHART}" --version "${version}" --app-version "${version}" --destination dist
+          echo "file=dist/agent-nexus-${version}.tgz" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to registry
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: echo "${REGISTRY_PASSWORD}" | helm registry login "${REGISTRY}" --username "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Push chart
+        env:
+          FILE: ${{ steps.package.outputs.file }}
+        run: helm push "${FILE}" "${REPOSITORY}"

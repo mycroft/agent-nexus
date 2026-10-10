@@ -1,0 +1,14 @@
+apiVersion: v2
+name: agent-nexus
+description: An LLM agent service that reviews pull requests on Gitea and GitHub with a llama-server backend.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://git.mkz.me/mycroft/agent-nexus
+sources:
+  - https://git.mkz.me/mycroft/agent-nexus
+keywords:
+  - llm
+  - code-review
+  - gitea
+  - github
