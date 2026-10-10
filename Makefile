@@ -6,7 +6,7 @@ CONTAINER_TOOL ?= docker
 
 BIN := $(CURDIR)/bin
 
-.PHONY: build run test vet lint docker-build clean
+.PHONY: build run test vet lint docker-build helm-lint clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN)/agent-nexus ./cmd/agent-nexus
@@ -26,6 +26,9 @@ lint:
 
 docker-build:
 	$(CONTAINER_TOOL) build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
+
+helm-lint:
+	for values in charts/agent-nexus/ci/*-values.yaml; do helm lint --strict charts/agent-nexus -f $$values || exit 1; done
 
 clean:
 	rm -rf $(BIN)

@@ -1,0 +1,148 @@
+{{- include "agent-nexus.validate" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "agent-nexus.fullname" . }}
+  labels:
+    {{- include "agent-nexus.labels" . | nindent 4 }}
+spec:
+  # The SQLite job store has a single writer: never more than one pod.
+  replicas: 1
+  serviceName: {{ include "agent-nexus.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "agent-nexus.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "agent-nexus.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: agent-nexus
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+          env:
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: METRICS_ADDR
+              value: ":9090"
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            - name: DB_PATH
+              value: /data/agent-nexus.db
+            - name: REPO_CACHE_DIR
+              value: /data/repos
+            - name: ALLOWED_OWNERS
+              value: {{ join "," .Values.allowedOwners | quote }}
+            - name: EVENTS_PER_MINUTE
+              value: {{ .Values.eventsPerMinute | quote }}
+            - name: AGENT_MAX_TURNS
+              value: {{ .Values.agentMaxTurns | quote }}
+            - name: JOB_TIMEOUT
+              value: {{ .Values.jobTimeout | quote }}
+            - name: TRANSCRIPT_RETENTION
+              value: {{ .Values.transcriptRetention | quote }}
+            {{- include "agent-nexus.secretEnv" (dict "name" "API_KEYS" "secret" .Values.existingSecret "key" "api-keys") | nindent 12 }}
+            - name: LLM_BASE_URL
+              value: {{ .Values.llm.baseURL | quote }}
+            - name: LLM_MODEL
+              value: {{ .Values.llm.model | quote }}
+            {{- if .Values.llm.contextTokens }}
+            - name: LLM_CONTEXT_TOKENS
+              value: {{ .Values.llm.contextTokens | quote }}
+            {{- end }}
+            - name: LLM_CONCURRENCY
+              value: {{ .Values.llm.concurrency | quote }}
+            - name: LLM_REQUEST_TIMEOUT
+              value: {{ .Values.llm.requestTimeout | quote }}
+            {{- include "agent-nexus.secretEnv" (dict "name" "LLM_API_KEY" "secret" .Values.existingSecret "key" "llm-api-key" "optional" true) | nindent 12 }}
+            {{- if .Values.gitea.enabled }}
+            - name: GITEA_URL
+              value: {{ .Values.gitea.url | quote }}
+            - name: GITEA_USER
+              value: {{ .Values.gitea.user | quote }}
+            {{- include "agent-nexus.secretEnv" (dict "name" "GITEA_TOKEN" "secret" .Values.existingSecret "key" "gitea-token") | nindent 12 }}
+            {{- end }}
+            {{- if .Values.github.enabled }}
+            - name: GITHUB_APP_ID
+              value: {{ .Values.github.appID | quote }}
+            - name: GITHUB_API_URL
+              value: {{ .Values.github.apiURL | quote }}
+            - name: GITHUB_SERVER_URL
+              value: {{ .Values.github.serverURL | quote }}
+            {{- include "agent-nexus.secretEnv" (dict "name" "GITHUB_APP_PRIVATE_KEY" "secret" .Values.existingSecret "key" "github-app-private-key") | nindent 12 }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # git's HOME; the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "agent-nexus.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}

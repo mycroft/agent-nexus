@@ -1,0 +1,124 @@
+image:
+  repository: registry.mkz.me/mycroft/agent-nexus
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of an existing Secret holding the credentials; the chart never
+# creates it. Keys:
+#   api-keys                "name=key,name=key", keys of 32+ characters (required)
+#   llm-api-key             bearer token for the LLM server (optional)
+#   gitea-token             token of the Gitea bot (when gitea.enabled)
+#   github-app-private-key  PEM private key of the GitHub App (when github.enabled)
+existingSecret: ""
+
+llm:
+  # OpenAI-compatible API root, e.g. https://llm-api.example.com/v1.
+  baseURL: ""
+  model: ""
+  # Context window in tokens; 0 asks llama-server's /props at startup.
+  contextTokens: 0
+  # Jobs run in parallel; match llama-server's --parallel.
+  concurrency: 1
+  # One completion, including the time llama-server keeps it queued.
+  requestTimeout: 10m
+
+gitea:
+  enabled: false
+  # Web root of the instance, e.g. https://gitea.example.com.
+  url: ""
+  # Login of the bot account owning gitea-token.
+  user: agent-nexus
+
+github:
+  enabled: false
+  appID: ""
+  apiURL: https://api.github.com
+  serverURL: https://github.com
+
+# Repository owners whose pull requests may be reviewed (required).
+allowedOwners: []
+# Sustained event rate allowed per API key.
+eventsPerMinute: 30
+# Tool-calling turns per review.
+agentMaxTurns: 30
+# One job, end to end.
+jobTimeout: 30m
+# How long agent transcripts are kept.
+transcriptRetention: 720h
+# debug, info, warn or error
+logLevel: info
+
+# Extra environment variables for the container.
+extraEnv: []
+
+# The SQLite job store and the bare repository cache. A single replica owns
+# the volume: the chart always runs one pod.
+persistence:
+  size: 5Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8080
+  # Serves /metrics. The ingress only routes the http port.
+  metricsPort: 9090
+
+# The event API authenticates callers with the API keys; it can be exposed.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: agent-nexus.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: agent-nexus-example-com-tls
+  #    hosts:
+  #      - agent-nexus.example.com
+
+# Requires the Prometheus operator CRDs.
+serviceMonitor:
+  enabled: false
+  # Labels the Prometheus instance selects ServiceMonitors by, e.g.
+  # release: prometheus.
+  labels: {}
+  interval: ""
+
+# git fetches and diffs of large repositories are the main memory users.
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

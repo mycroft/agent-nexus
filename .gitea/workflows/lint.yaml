@@ -30,3 +30,42 @@ jobs:
           version: v2.14.0
           args: --config=.golangci.yaml --timeout=5m
 
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    env:
+      CHART: charts/agent-nexus
+      KUBECONFORM_VERSION: v0.7.0
+      KUBECONFORM_SHA256: c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
+      # ServiceMonitor schemas come from the CRDs catalog.
+      CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v4.3.0
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
+          tar xzf kubeconform.tar.gz kubeconform
+
+      # The chart refuses to render without its required values, so it is
+      # linted with the CI value files only.
+      - name: Lint chart
+        run: |
+          for values in "${CHART}"/ci/*-values.yaml; do
+            helm lint --strict "${CHART}" -f "${values}"
+          done
+
+      - name: Validate rendered manifests
+        run: |
+          for values in "${CHART}"/ci/*-values.yaml; do
+            helm template agent-nexus "${CHART}" -f "${values}" \
+              | ./kubeconform -strict -summary -schema-location default -schema-location "${CRD_SCHEMAS}"
+          done
