@@ -67,6 +67,8 @@ type Draft struct {
 	Usage        llm.Usage       `json:"usage"`
 	PeakPrompt   int             `json:"peak_prompt_tokens"`
 	Turns        int             `json:"turns"`
+	Mode         Mode            `json:"mode"`
+	ModeSource   string          `json:"mode_source"`
 }
 
 // Reviewer produces and posts reviews.
@@ -78,7 +80,9 @@ type Reviewer struct {
 	Skill         skill.Skill
 	ContextTokens int
 	MaxTurns      int
-	Logger        *slog.Logger
+	// ModeRules is the central review mode configuration (see resolveMode).
+	ModeRules []ModeRule
+	Logger    *slog.Logger
 }
 
 // Handle implements jobs.Handler.
@@ -109,6 +113,9 @@ func (r *Reviewer) Handle(ctx context.Context, job *jobs.Job, run *jobs.Run) (jo
 		"prompt_tokens":      draft.Usage.PromptTokens,
 		"completion_tokens":  draft.Usage.CompletionTokens,
 		"peak_prompt_tokens": draft.PeakPrompt,
+		"mode":               draft.Mode,
+		"mode_source":        draft.ModeSource,
+		"event":              draft.Review.Event,
 		"turns":              draft.Turns,
 	}
 	return res, nil
@@ -229,6 +236,9 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 	budget := int(float64(r.ContextTokens) * diffBudgetShare * charsPerToken)
 	changed := selectDiffs(files, budget, peek)
 
+	mode, modeSource, configWarning := r.reviewMode(ctx, repo, baseSHA, repoID)
+	r.logger().InfoContext(ctx, "review mode", "repo", repoID.String(), "mode", mode, "source", modeSource)
+
 	guidanceName, guidance := "", ""
 	for _, name := range guidanceFiles {
 		if content, err := repo.ReadFile(ctx, baseSHA, name); err == nil {
@@ -283,6 +293,11 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 	}
 	out.Findings = cleanFindings(out.Findings, r.Logger)
 
+	var v *verdict
+	if mode == ModeVerdict {
+		event, note := verdictEvent(out)
+		v = &verdict{Event: event, Reason: out.VerdictReason, Note: note}
+	}
 	review, fallback := render(out, files, footer{
 		HeadSHA:          req.HeadSHA,
 		Model:            r.Model,
@@ -290,7 +305,8 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		PeakPromptTokens: session.PeakPromptTokens,
 		CompletionTokens: session.Usage.CompletionTokens,
 		JobID:            jobID,
-	})
+		Warning:          configWarning,
+	}, v)
 	return &Draft{
 		HeadSHA:      req.HeadSHA,
 		Review:       review,
@@ -299,7 +315,32 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		Usage:        session.Usage,
 		PeakPrompt:   session.PeakPromptTokens,
 		Turns:        session.Turns,
+		Mode:         mode,
+		ModeSource:   modeSource,
 	}, Drafted, nil
+}
+
+// reviewMode resolves the review mode of a repository from the central
+// rules and its config file at the base commit. An unreadable or invalid
+// file is ignored, with a warning for the review body.
+func (r *Reviewer) reviewMode(ctx context.Context, repo *gitrepo.Repo, baseSHA string, repoID forge.Repo) (Mode, string, string) {
+	var fileMode Mode
+	warning := ""
+	content, err := repo.ReadFile(ctx, baseSHA, RepoConfigFile)
+	switch {
+	case errors.Is(err, gitrepo.ErrNotFound):
+	case err != nil:
+		warning = fmt.Sprintf("%s could not be read and was ignored: %v", RepoConfigFile, err)
+	default:
+		if fileMode, err = parseRepoConfig(content); err != nil {
+			warning = fmt.Sprintf("%s was ignored: %v", RepoConfigFile, err)
+		}
+	}
+	if warning != "" {
+		r.logger().WarnContext(ctx, "repository config ignored", "repo", repoID.String(), "warning", warning)
+	}
+	mode, source := resolveMode(r.ModeRules, repoID, fileMode)
+	return mode, source, warning
 }
 
 // cleanFindings normalizes paths and drops findings without evidence, which
@@ -346,31 +387,42 @@ func (r *Reviewer) Post(ctx context.Context, req Request, d *Draft) (Outcome, er
 		return "", err
 	}
 
-	err = f.CreateReview(ctx, repoID, req.PR, d.Review)
-	if err == nil {
-		return Posted, nil
+	for i, review := range postAttempts(d) {
+		if i > 0 {
+			// A failed attempt may still have gone through, or left a
+			// pending review behind.
+			r.logger().WarnContext(ctx, "review rejected, retrying a simpler one", "error", err, "event", review.Event, "inline_comments", len(review.Comments))
+			posted, perr := r.alreadyPosted(ctx, f, repoID, req.PR, d.HeadSHA)
+			if perr != nil {
+				return "", perr
+			}
+			if posted {
+				return AlreadyPosted, nil
+			}
+			if derr := f.DeletePendingReviews(ctx, repoID, req.PR); derr != nil {
+				return "", derr
+			}
+		}
+		if err = f.CreateReview(ctx, repoID, req.PR, review); err == nil {
+			return Posted, nil
+		}
 	}
-	if len(d.Review.Comments) == 0 {
-		return "", err
+	return "", err
+}
+
+// postAttempts lists the reviews to try in order: the draft; then, as
+// inline comments are the usual cause of a rejection, every finding in the
+// body; then, in case the bot may not approve or request changes, the same
+// as a plain comment.
+func postAttempts(d *Draft) []forge.NewReview {
+	attempts := []forge.NewReview{d.Review}
+	if len(d.Review.Comments) > 0 {
+		attempts = append(attempts, forge.NewReview{CommitSHA: d.HeadSHA, Event: d.Review.Event, Body: d.FallbackBody})
 	}
-	// Inline comments are the usual cause of a rejected review; retry
-	// once with every finding in the body, unless the first attempt
-	// actually went through.
-	r.logger().WarnContext(ctx, "review with inline comments rejected, retrying without them", "error", err)
-	posted, err = r.alreadyPosted(ctx, f, repoID, req.PR, d.HeadSHA)
-	if err != nil {
-		return "", err
+	if d.Review.Event != "" && d.Review.Event != forge.EventComment {
+		attempts = append(attempts, forge.NewReview{CommitSHA: d.HeadSHA, Event: forge.EventComment, Body: d.FallbackBody})
 	}
-	if posted {
-		return AlreadyPosted, nil
-	}
-	if err := f.DeletePendingReviews(ctx, repoID, req.PR); err != nil {
-		return "", err
-	}
-	if err := f.CreateReview(ctx, repoID, req.PR, forge.NewReview{CommitSHA: d.HeadSHA, Body: d.FallbackBody}); err != nil {
-		return "", err
-	}
-	return Posted, nil
+	return attempts
 }
 
 func (r *Reviewer) alreadyPosted(ctx context.Context, f forge.Forge, repo forge.Repo, pr int, headSHA string) (bool, error) {

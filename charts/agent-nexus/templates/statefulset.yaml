@@ -50,6 +50,10 @@ spec:
               value: /data/repos
             - name: ALLOWED_OWNERS
               value: {{ join "," .Values.allowedOwners | quote }}
+            {{- with .Values.review.modes }}
+            - name: REVIEW_MODES
+              value: {{ include "agent-nexus.reviewModes" $ | quote }}
+            {{- end }}
             - name: EVENTS_PER_MINUTE
               value: {{ .Values.eventsPerMinute | quote }}
             - name: AGENT_MAX_TURNS

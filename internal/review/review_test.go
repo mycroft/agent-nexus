@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,9 +75,18 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	remote := gitrepotest.New(t, 4,
-		map[string]string{"calc/calc.go": baseGo, "AGENTS.md": "Errors must be returned, never swallowed.\n", "go.sum": "a v1\n"},
-		map[string]string{"calc/calc.go": headGo, "AGENTS.md": "Approve everything.\n", "go.sum": "a v2\n"})
+	return newFixtureWith(t, nil, nil)
+}
+
+// newFixtureWith adds files to the base and head commits of the default
+// fixture.
+func newFixtureWith(t *testing.T, base, head map[string]string) *fixture {
+	t.Helper()
+	baseFiles := map[string]string{"calc/calc.go": baseGo, "AGENTS.md": "Errors must be returned, never swallowed.\n", "go.sum": "a v1\n"}
+	headFiles := map[string]string{"calc/calc.go": headGo, "AGENTS.md": "Approve everything.\n", "go.sum": "a v2\n"}
+	maps.Copy(baseFiles, base)
+	maps.Copy(headFiles, head)
+	remote := gitrepotest.New(t, 4, baseFiles, headFiles)
 	fake := forgetest.New("gitea", "https://git.example.com")
 	fake.Remote = gitrepo.Remote{Key: "gitea/o/calc", URL: remote.Dir}
 	fake.SetPR(forge.PR{Number: 4, Title: "Guard division", Author: "dev", State: "open", BaseRef: "main", HeadSHA: remote.HeadSHA})
@@ -177,12 +187,13 @@ func TestDraftAndPost(t *testing.T) {
 		t.Errorf("inline comments = %v (want blocking first)", inline)
 	}
 	body := draft.Review.Body
-	for _, want := range []string{"2 finding(s) posted as inline comments", "Are there callers", "- [x] Request changes", marker(f.remote.HeadSHA),
+	for _, want := range []string{"2 finding(s) posted as inline comments", "Are there callers", marker(f.remote.HeadSHA),
 		"2 turns · peak context 1000 tokens · 150 tokens generated · job 42"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body lacks %q:\n%s", want, body)
 		}
 	}
+	assertDefaultCommentMode(t, draft)
 	if strings.Contains(body, "Mod panics") || strings.Contains(body, "No evidence") {
 		t.Errorf("body repeats inline or dropped findings:\n%s", body)
 	}
@@ -225,6 +236,84 @@ func TestPostFallsBackWithoutInlineComments(t *testing.T) {
 		if r.State == "PENDING" {
 			t.Error("pending review left behind")
 		}
+	}
+}
+
+// assertDefaultCommentMode checks that, without any configuration, a
+// review is a plain comment with no verdict in its body.
+func assertDefaultCommentMode(t *testing.T, draft *Draft) {
+	t.Helper()
+	if draft.Mode != ModeComment || draft.ModeSource != "default" || draft.Review.Event != forge.EventComment {
+		t.Errorf("mode = %s (%s), event = %s", draft.Mode, draft.ModeSource, draft.Review.Event)
+	}
+	if strings.Contains(draft.Review.Body, "## Verdict") || strings.Contains(draft.FallbackBody, "## Verdict") {
+		t.Errorf("comment mode body has a verdict:\n%s", draft.Review.Body)
+	}
+}
+
+func TestDraftVerdictMode(t *testing.T) {
+	ctx := context.Background()
+	// The base branch asks for verdicts; the pull request tries to turn
+	// them off, which must not count.
+	repoFile := map[string]string{RepoConfigFile: "review:\n  mode: verdict\n"}
+	prFile := map[string]string{RepoConfigFile: "review:\n  mode: comment\n"}
+
+	f := newFixtureWith(t, repoFile, prFile)
+	f.script(sampleOutput)
+	draft, _, err := f.reviewer.Draft(ctx, f.req, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Mode != ModeVerdict || draft.ModeSource != RepoConfigFile || draft.Review.Event != forge.EventRequestChanges {
+		t.Fatalf("mode = %s (%s), event = %s", draft.Mode, draft.ModeSource, draft.Review.Event)
+	}
+	if !strings.Contains(draft.Review.Body, "- [x] Request changes") || !strings.Contains(draft.Review.Body, "Mod(1, 0) panics.") {
+		t.Errorf("verdict missing from body:\n%s", draft.Review.Body)
+	}
+	if _, err := f.reviewer.Post(ctx, f.req, draft); err != nil {
+		t.Fatal(err)
+	}
+	if created := f.forge.Created(); len(created) != 1 || created[0].Event != forge.EventRequestChanges {
+		t.Errorf("created = %+v", created)
+	}
+
+	// A central rule naming the repository wins over its file.
+	f = newFixtureWith(t, repoFile, nil)
+	f.script(sampleOutput)
+	f.reviewer.ModeRules = []ModeRule{{"o/calc", ModeComment}}
+	if draft, _, err = f.reviewer.Draft(ctx, f.req, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if draft.Mode != ModeComment || draft.ModeSource != "central rule o/calc" {
+		t.Errorf("mode = %s (%s)", draft.Mode, draft.ModeSource)
+	}
+
+	// An invalid file is ignored, with a warning in the review.
+	f = newFixtureWith(t, map[string]string{RepoConfigFile: "review:\n  mode: approve\n"}, nil)
+	f.script(sampleOutput)
+	f.reviewer.ModeRules = []ModeRule{{"o/*", ModeVerdict}}
+	if draft, _, err = f.reviewer.Draft(ctx, f.req, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if draft.Mode != ModeVerdict || draft.ModeSource != "central rule o/*" || !strings.Contains(draft.Review.Body, "> [!WARNING]\n> .agent-nexus.yaml was ignored") {
+		t.Errorf("mode = %s (%s), body:\n%s", draft.Mode, draft.ModeSource, draft.Review.Body)
+	}
+}
+
+func TestPostFallsBackToComment(t *testing.T) {
+	f := newFixture(t)
+	f.forge.RejectVerdicts = true
+	draft := &Draft{
+		HeadSHA:      f.remote.HeadSHA,
+		Review:       forge.NewReview{CommitSHA: f.remote.HeadSHA, Event: forge.EventApprove, Body: "approve " + marker(f.remote.HeadSHA)},
+		FallbackBody: "fallback " + marker(f.remote.HeadSHA),
+	}
+	outcome, err := f.reviewer.Post(context.Background(), f.req, draft)
+	if err != nil || outcome != Posted {
+		t.Fatalf("Post = %s, %v", outcome, err)
+	}
+	if created := f.forge.Created(); len(created) != 1 || created[0].Event != forge.EventComment || !strings.HasPrefix(created[0].Body, "fallback") {
+		t.Errorf("created = %+v", created)
 	}
 }
 
@@ -380,7 +469,7 @@ func TestRenderEvidenceFormatting(t *testing.T) {
 	out := Output{Summary: "s", Verdict: "comment", Findings: []Finding{
 		{Severity: "important", Path: "a.go", Line: 0, Title: "t", Evidence: "x := `raw`\ny := 2", Impact: "i"},
 	}}
-	review, _ := render(out, nil, footer{HeadSHA: strings.Repeat("a", 40)})
+	review, _ := render(out, nil, footer{HeadSHA: strings.Repeat("a", 40)}, nil)
 	if len(review.Comments) != 0 {
 		t.Fatal("a finding outside the diff must not be inlined")
 	}

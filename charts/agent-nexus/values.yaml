@@ -42,6 +42,23 @@ github:
 
 # Repository owners whose pull requests may be reviewed (required).
 allowedOwners: []
+
+review:
+  # How reviews are submitted, per repository:
+  #   comment  a plain comment review, without a verdict (the default)
+  #   verdict  approve, comment or request changes, from the review's
+  #            verdict (downgraded to a comment when it contradicts the
+  #            findings)
+  # The mode is decided by, first match wins:
+  #   1. a rule below naming the repository exactly
+  #   2. review.mode in the repository's .agent-nexus.yaml (base branch)
+  #   3. a rule below with a pattern (path.Match, e.g. "mycroft/*")
+  #   4. comment
+  modes: []
+  #  - repo: mycroft/k8s-home
+  #    mode: verdict
+  #  - repo: "mycroft/*"
+  #    mode: comment
 # Sustained event rate allowed per API key.
 eventsPerMinute: 30
 # Tool-calling turns per review.

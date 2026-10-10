@@ -34,7 +34,7 @@ The flow is event → job → handler → agent → forge.
 - **Model input never becomes a git option.** It goes after `-e`, `--end-of-options` or `--`, or inside a `sha:path` with a path checked by `CleanPath`. Revisions are always SHAs that agent-nexus chose.
 - **Forge POSTs are never retried by the HTTP client.** A failed Gitea review can leave a pending review behind. `Post` deletes it and checks for the marker before trying again.
 - **Repository guidance comes from the base commit,** never the PR head.
-- **Reviews are always `COMMENT`.**
+- **Reviews are `COMMENT` unless the repository resolves to verdict mode.** See `resolveMode` in `internal/review/mode.go`: an exact central rule, then `.agent-nexus.yaml` on the base commit, then central patterns, then comment. `verdictEvent` downgrades a verdict that contradicts the findings, and `postAttempts` falls back to a comment if the forge refuses the verdict.
 
 ## Style
 

@@ -74,10 +74,20 @@ type Comment struct {
 	Body string `json:"body"`
 }
 
-// NewReview is a review to create. It is always submitted as a plain
-// comment review: agent-nexus never approves or requests changes.
+// Event is how a review is submitted.
+type Event string
+
+// Review events. The zero value submits a plain comment review.
+const (
+	EventComment        Event = "comment"
+	EventApprove        Event = "approve"
+	EventRequestChanges Event = "request_changes"
+)
+
+// NewReview is a review to create.
 type NewReview struct {
 	CommitSHA string    `json:"commit_sha"`
+	Event     Event     `json:"event,omitempty"`
 	Body      string    `json:"body"`
 	Comments  []Comment `json:"comments"`
 }

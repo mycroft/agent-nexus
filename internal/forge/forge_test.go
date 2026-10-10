@@ -101,6 +101,14 @@ func TestGitea(t *testing.T) {
 	if created["event"] != "COMMENT" || created["commit_id"] != "h" || first["new_position"] != float64(12) || first["path"] != "a.go" {
 		t.Errorf("create review body = %v", created)
 	}
+	for event, want := range map[Event]string{EventApprove: "APPROVED", EventRequestChanges: "REQUEST_CHANGES", EventComment: "COMMENT"} {
+		if err := g.CreateReview(ctx, repo, 3, NewReview{CommitSHA: "h", Event: event, Body: "b"}); err != nil {
+			t.Fatal(err)
+		}
+		if created["event"] != want {
+			t.Errorf("event %s sent as %v, want %s", event, created["event"], want)
+		}
+	}
 
 	remote, err := g.GitRemote(ctx, repo)
 	if err != nil {
@@ -234,6 +242,14 @@ func TestGitHubAppAuth(t *testing.T) {
 	first, _ := comments[0].(map[string]any)
 	if review["event"] != "COMMENT" || first["side"] != "RIGHT" || first["line"] != float64(3) {
 		t.Errorf("review body = %v", review)
+	}
+	for event, want := range map[Event]string{EventApprove: "APPROVE", EventRequestChanges: "REQUEST_CHANGES"} {
+		if err := g.CreateReview(ctx, repo, 5, NewReview{CommitSHA: "h", Event: event, Body: "b"}); err != nil {
+			t.Fatal(err)
+		}
+		if review["event"] != want {
+			t.Errorf("event %s sent as %v, want %s", event, review["event"], want)
+		}
 	}
 
 	remote, err := g.GitRemote(ctx, repo)

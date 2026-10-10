@@ -30,8 +30,9 @@ workflow ──POST /v1/events/pr-review──▶ API (API key, owner allowlist,
 - **Idempotent posting.** Each review carries a hidden marker with the
   commit SHA. A job that is retried, or recovered after a crash, never
   posts twice.
-- **Comment only.** Reviews are always posted as `COMMENT`. The verdict is
-  text in the body, never an approval or a change request.
+- **Comment or verdict, per repository.** By default a review is a plain
+  comment. Repositories in verdict mode get an approval, a comment or a
+  change request instead (see [Review modes](#review-modes)).
 
 The review instructions live in [`skills/pr-review/SKILL.md`](skills/pr-review/SKILL.md),
 which uses the Agent Skills format and is embedded in the binary.
@@ -65,6 +66,7 @@ Everything is configured through environment variables.
 | `API_KEYS` | required for `serve` | `name=key,name=key`, each key ≥ 32 characters |
 | `ALLOWED_OWNERS` | required for `serve` | Comma-separated repository owners |
 | `EVENTS_PER_MINUTE` | `30` | Rate limit per API key |
+| `REVIEW_MODES` | | Central review mode rules, `pattern=mode,…` (see below) |
 | `GITEA_URL`, `GITEA_USER`, `GITEA_TOKEN` | | Gitea forge (bot account) |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | | GitHub forge (App, PEM key) |
 | `GITHUB_API_URL`, `GITHUB_SERVER_URL` | github.com | For GitHub Enterprise |
@@ -77,6 +79,56 @@ Everything is configured through environment variables.
 | `LOG_LEVEL` | `info` | |
 
 At least one forge must be configured.
+
+## Review modes
+
+Each repository is reviewed in one of two modes:
+
+- **`comment`** (the default): the review is a plain comment with a
+  summary and findings, and no verdict.
+- **`verdict`**: the review is submitted as an approval, a comment or a
+  change request, following its verdict. A verdict that contradicts the
+  findings is downgraded to a comment, with a note explaining why:
+  - approving requires no blocking or important finding;
+  - requesting changes requires a blocking finding.
+
+If the forge refuses the verdict, for example because the bot may only
+comment, the review is posted as a comment.
+
+The mode comes from the first of these that applies:
+
+1. **A central rule naming the repository exactly.**
+2. **`review.mode` in the repository's `.agent-nexus.yaml`**, read from
+   the base branch, so a pull request cannot change its own mode.
+3. **A central rule with a pattern.** Patterns use `path.Match`, e.g.
+   `mycroft/*`.
+4. **`comment`.**
+
+Central rules are an ordered list: `REVIEW_MODES`, or `review.modes` in
+the Helm chart.
+
+```yaml
+# Helm values
+review:
+  modes:
+    - repo: mycroft/k8s-home   # always verdict, whatever its file says
+      mode: verdict
+    - repo: "mycroft/*"        # others: comment, unless their file says otherwise
+      mode: comment
+```
+
+```yaml
+# .agent-nexus.yaml, at the root of a repository
+review:
+  mode: verdict
+```
+
+When `.agent-nexus.yaml` is invalid, agent-nexus ignores it and says so
+in the review.
+
+On Gitea, an approval counts toward branch protection only when the
+reviewer has write access or is in the approvals allowlist. A read-only
+bot's approvals are shown but are not "official".
 
 ## API
 

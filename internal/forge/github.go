@@ -299,7 +299,7 @@ func (g *GitHub) CreateReview(ctx context.Context, repo Repo, number int, review
 		Body     string    `json:"body"`
 		Event    string    `json:"event"`
 		Comments []comment `json:"comments"`
-	}{CommitID: review.CommitSHA, Body: review.Body, Event: "COMMENT", Comments: []comment{}}
+	}{CommitID: review.CommitSHA, Body: review.Body, Event: githubEvent(review.Event), Comments: []comment{}}
 	for _, c := range review.Comments {
 		in.Comments = append(in.Comments, comment{Path: c.Path, Line: c.Line, Side: "RIGHT", Body: c.Body})
 	}
@@ -308,6 +308,17 @@ func (g *GitHub) CreateReview(ctx context.Context, repo Repo, number int, review
 		return fmt.Errorf("github: create review: %w", err)
 	}
 	return nil
+}
+
+func githubEvent(e Event) string {
+	switch e {
+	case EventApprove:
+		return "APPROVE"
+	case EventRequestChanges:
+		return "REQUEST_CHANGES"
+	default:
+		return "COMMENT"
+	}
 }
 
 // GitRemote implements Forge.

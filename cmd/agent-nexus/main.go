@@ -124,6 +124,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err != nil {
 		return nil, err
 	}
+	modeRules, err := review.ParseModeRules(cfg.ReviewModes)
+	if err != nil {
+		return nil, fmt.Errorf("REVIEW_MODES: %w", err)
+	}
 	repos, err := gitrepo.NewCache(cfg.RepoCacheDir)
 	if err != nil {
 		return nil, err
@@ -136,6 +140,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		Skill:         prSkill,
 		ContextTokens: contextTokens,
 		MaxTurns:      cfg.AgentMaxTurns,
+		ModeRules:     modeRules,
 		Logger:        log,
 	}
 	return a, nil

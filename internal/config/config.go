@@ -35,6 +35,9 @@ type Config struct {
 	AllowedOwners []string
 	// EventsPerMinute is the sustained per-API-key event rate.
 	EventsPerMinute int
+	// ReviewModes is the raw "pattern=mode,..." central review mode
+	// configuration, parsed by review.ParseModeRules.
+	ReviewModes string
 
 	LLMBaseURL string
 	LLMAPIKey  string
@@ -77,6 +80,7 @@ func Load() (Config, error) {
 		SkillsDir:           os.Getenv("SKILLS_DIR"),
 		APIKeys:             os.Getenv("API_KEYS"),
 		AllowedOwners:       splitList(os.Getenv("ALLOWED_OWNERS")),
+		ReviewModes:         os.Getenv("REVIEW_MODES"),
 		LLMBaseURL:          os.Getenv("LLM_BASE_URL"),
 		LLMAPIKey:           os.Getenv("LLM_API_KEY"),
 		LLMModel:            os.Getenv("LLM_MODEL"),

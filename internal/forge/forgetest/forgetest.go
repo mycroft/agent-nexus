@@ -24,7 +24,10 @@ type Fake struct {
 	// RejectInline fails reviews that carry inline comments, like GitHub
 	// does for a line outside the diff.
 	RejectInline bool
-	created      []forge.NewReview
+	// RejectVerdicts fails approvals and change requests, like a forge
+	// where the bot may only comment.
+	RejectVerdicts bool
+	created        []forge.NewReview
 }
 
 // New returns a fake forge.
@@ -100,6 +103,9 @@ func (f *Fake) CreateReview(_ context.Context, _ forge.Repo, _ int, r forge.NewR
 	defer f.mu.Unlock()
 	if f.RejectInline && len(r.Comments) > 0 {
 		return errors.New("422 line could not be resolved")
+	}
+	if f.RejectVerdicts && r.Event != "" && r.Event != forge.EventComment {
+		return errors.New("403 the bot may not approve or request changes")
 	}
 	f.created = append(f.created, r)
 	f.reviews = append(f.reviews, forge.Review{ID: int64(len(f.reviews) + 1), User: f.Login, Body: r.Body, State: "COMMENT", CommitID: r.CommitSHA})

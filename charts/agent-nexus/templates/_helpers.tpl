@@ -70,6 +70,20 @@ Fail early on settings agent-nexus would refuse at startup.
 {{- end }}
 {{- end }}
 
+{{/*
+review.modes as REVIEW_MODES: "repo=mode,repo=mode", in order.
+*/}}
+{{- define "agent-nexus.reviewModes" -}}
+{{- $rules := list }}
+{{- range .Values.review.modes }}
+{{- if not (and .repo (has .mode (list "comment" "verdict"))) }}
+{{- fail (printf "review.modes entries need a repo and a mode of comment or verdict, got %v" .) }}
+{{- end }}
+{{- $rules = append $rules (printf "%s=%s" .repo .mode) }}
+{{- end }}
+{{- join "," $rules }}
+{{- end }}
+
 {{- define "agent-nexus.secretEnv" -}}
 - name: {{ .name }}
   valueFrom:

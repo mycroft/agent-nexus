@@ -15,6 +15,12 @@ github:
 allowedOwners:
   - mycroft
   - other
+review:
+  modes:
+    - repo: mycroft/k8s-home
+      mode: verdict
+    - repo: "mycroft/*"
+      mode: comment
 extraEnv:
   - name: SKILLS_DIR
     value: /skills

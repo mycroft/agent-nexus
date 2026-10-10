@@ -158,7 +158,7 @@ func (g *Gitea) CreateReview(ctx context.Context, repo Repo, number int, review 
 		Body     string    `json:"body"`
 		CommitID string    `json:"commit_id"`
 		Comments []comment `json:"comments"`
-	}{Event: "COMMENT", Body: review.Body, CommitID: review.CommitSHA, Comments: []comment{}}
+	}{Event: giteaEvent(review.Event), Body: review.Body, CommitID: review.CommitSHA, Comments: []comment{}}
 	for _, c := range review.Comments {
 		in.Comments = append(in.Comments, comment{Path: c.Path, Body: c.Body, NewPosition: c.Line})
 	}
@@ -167,6 +167,17 @@ func (g *Gitea) CreateReview(ctx context.Context, repo Repo, number int, review 
 		return fmt.Errorf("gitea: create review: %w", err)
 	}
 	return nil
+}
+
+func giteaEvent(e Event) string {
+	switch e {
+	case EventApprove:
+		return "APPROVED"
+	case EventRequestChanges:
+		return "REQUEST_CHANGES"
+	default:
+		return "COMMENT"
+	}
 }
 
 // GitRemote implements Forge.
