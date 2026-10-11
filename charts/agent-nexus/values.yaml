@@ -22,6 +22,11 @@ llm:
   model: ""
   # Context window in tokens; 0 asks llama-server's /props at startup.
   contextTokens: 0
+  # Most tokens the model may reason for in one request, e.g. 6144; 0
+  # leaves llama-server's default. Too low cuts its reasoning mid-thought;
+  # too high makes each turn slow (the job timeout then ends the
+  # investigation sooner).
+  thinkingBudget: 0
   # Jobs run in parallel; match llama-server's --parallel.
   concurrency: 1
   # One completion, including the time llama-server keeps it queued.

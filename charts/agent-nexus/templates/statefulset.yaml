@@ -79,6 +79,10 @@ spec:
             - name: LLM_CONTEXT_TOKENS
               value: {{ .Values.llm.contextTokens | quote }}
             {{- end }}
+            {{- if .Values.llm.thinkingBudget }}
+            - name: LLM_THINKING_BUDGET
+              value: {{ .Values.llm.thinkingBudget | quote }}
+            {{- end }}
             - name: LLM_CONCURRENCY
               value: {{ .Values.llm.concurrency | quote }}
             - name: LLM_REQUEST_TIMEOUT

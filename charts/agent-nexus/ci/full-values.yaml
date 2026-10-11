@@ -4,6 +4,7 @@ llm:
   baseURL: https://llm.example.com/v1
   model: test-model
   contextTokens: 32768
+  thinkingBudget: 6144
   concurrency: 2
 gitea:
   enabled: true

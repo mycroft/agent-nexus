@@ -93,10 +93,11 @@ type Completion struct {
 
 // Client sends requests to an OpenAI-compatible chat-completions endpoint.
 type Client struct {
-	httpClient *httpclient.Client
-	baseURL    *url.URL
-	apiKey     string
-	model      string
+	httpClient     *httpclient.Client
+	baseURL        *url.URL
+	apiKey         string
+	model          string
+	thinkingBudget int
 }
 
 // Option customizes a Client.
@@ -105,6 +106,14 @@ type Option func(*Client)
 // WithHTTPClient replaces the HTTP wrapper, primarily for tests.
 func WithHTTPClient(client *httpclient.Client) Option {
 	return func(c *Client) { c.httpClient = client }
+}
+
+// WithThinkingBudget caps the model's reasoning per request, in tokens
+// (llama-server's thinking_budget_tokens), instead of the server's
+// default. Zero keeps the default. It is a sampling parameter, not part
+// of the prompt, so the prompt cache is unaffected.
+func WithThinkingBudget(tokens int) Option {
+	return func(c *Client) { c.thinkingBudget = tokens }
 }
 
 // New constructs a client. baseURL is the API root (for example
@@ -173,6 +182,8 @@ func (c *Client) Complete(ctx context.Context, r Request) (Completion, error) {
 	}
 	if r.DisableThinking {
 		body.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+	} else if c.thinkingBudget > 0 {
+		body.ThinkingBudgetTokens = c.thinkingBudget
 	}
 
 	start := time.Now()
@@ -291,6 +302,8 @@ type chatRequest struct {
 	Tools              []wireTool      `json:"tools,omitempty"`
 	ResponseFormat     *responseFormat `json:"response_format,omitempty"`
 	ChatTemplateKwargs map[string]any  `json:"chat_template_kwargs,omitempty"`
+	// ThinkingBudgetTokens is a llama-server extension.
+	ThinkingBudgetTokens int `json:"thinking_budget_tokens,omitempty"`
 }
 
 type wireTool struct {

@@ -48,7 +48,7 @@ func TestCompleteToolCallRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["model"] != "test-model" || got["response_format"] != nil || got["chat_template_kwargs"] != nil {
+	if got["model"] != "test-model" || got["response_format"] != nil || got["chat_template_kwargs"] != nil || got["thinking_budget_tokens"] != nil {
 		t.Errorf("unexpected request body: %v", got)
 	}
 	tools, _ := got["tools"].([]any)
@@ -92,6 +92,34 @@ func TestCompleteSchema(t *testing.T) {
 		Tools:    []ToolDef{{Name: "x"}},
 	}); err == nil {
 		t.Error("schema combined with tools was accepted")
+	}
+}
+
+func TestThinkingBudget(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{}"}}]}`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL+"/v1", "", "test-model", 5*time.Second, WithThinkingBudget(6144))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got["thinking_budget_tokens"] != float64(6144) {
+		t.Errorf("thinking_budget_tokens = %v, want 6144", got["thinking_budget_tokens"])
+	}
+	// Without thinking, a budget means nothing: it is not sent.
+	if _, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}, DisableThinking: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got["thinking_budget_tokens"] != nil {
+		t.Errorf("thinking_budget_tokens = %v with thinking disabled", got["thinking_budget_tokens"])
 	}
 }
 

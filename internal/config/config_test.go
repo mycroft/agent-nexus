@@ -27,8 +27,12 @@ func TestLoadDefaults(t *testing.T) {
 	if len(c.AllowedOwners) != 2 || c.AllowedOwners[1] != "other" {
 		t.Errorf("AllowedOwners = %q", c.AllowedOwners)
 	}
-	if c.LLMConcurrency != 1 || c.AgentMaxTurns != 30 || c.LLMRequestTimeout != 10*time.Minute || c.JobTimeout != 30*time.Minute {
+	if c.LLMConcurrency != 1 || c.AgentMaxTurns != 30 || c.LLMRequestTimeout != 10*time.Minute || c.JobTimeout != 30*time.Minute || c.LLMThinkingBudget != 0 {
 		t.Errorf("defaults: %+v", c)
+	}
+	t.Setenv("LLM_THINKING_BUDGET", "6144")
+	if c, err := Load(); err != nil || c.LLMThinkingBudget != 6144 {
+		t.Errorf("LLM_THINKING_BUDGET = %d, %v", c.LLMThinkingBudget, err)
 	}
 }
 
@@ -40,6 +44,8 @@ func TestLoadErrors(t *testing.T) {
 		"bad duration":    {"JOB_TIMEOUT": "soon"},
 		"zero workers":    {"LLM_CONCURRENCY": "0"},
 		"negative tokens": {"LLM_CONTEXT_TOKENS": "-1"},
+		"negative budget": {"LLM_THINKING_BUDGET": "-1"},
+		"invalid budget":  {"LLM_THINKING_BUDGET": "lots"},
 		"no model":        {"LLM_MODEL": ""},
 	} {
 		t.Run(name, func(t *testing.T) {

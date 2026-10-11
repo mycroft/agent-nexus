@@ -109,7 +109,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		byName[g.Name()] = g
 	}
 
-	client, err := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMRequestTimeout)
+	client, err := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMRequestTimeout, llm.WithThinkingBudget(cfg.LLMThinkingBudget))
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 			return nil, fmt.Errorf("discover the model context size (set LLM_CONTEXT_TOKENS to skip): %w", err)
 		}
 	}
-	log.Info("llm configured", "base_url", cfg.LLMBaseURL, "model", cfg.LLMModel, "context_tokens", contextTokens)
+	log.Info("llm configured", "base_url", cfg.LLMBaseURL, "model", cfg.LLMModel, "context_tokens", contextTokens, "thinking_budget", cfg.LLMThinkingBudget)
 
 	var skillFS fs.FS = skills.FS
 	if cfg.SkillsDir != "" {

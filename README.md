@@ -62,6 +62,7 @@ Everything is configured through environment variables.
 | `LLM_API_KEY` | | Bearer token for the LLM server |
 | `LLM_MODEL` | required | Model name sent with each request |
 | `LLM_CONTEXT_TOKENS` | from `/props` | Context window; set it to avoid the startup lookup |
+| `LLM_THINKING_BUDGET` | server default | Most reasoning tokens per request (llama-server `thinking_budget_tokens`); `0` keeps the server's default |
 | `LLM_CONCURRENCY` | `1` | Parallel jobs; match llama-server `--parallel` |
 | `LLM_REQUEST_TIMEOUT` | `10m` | One completion, including time queued in llama-server |
 | `AGENT_MAX_TURNS` | `30` | Tool-loop turns per review |

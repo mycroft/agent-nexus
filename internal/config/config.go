@@ -54,6 +54,9 @@ type Config struct {
 	// LLMContextTokens overrides the context size discovered from
 	// llama-server's /props endpoint. Zero means discover.
 	LLMContextTokens int
+	// LLMThinkingBudget caps the model's reasoning per request, in tokens.
+	// Zero leaves llama-server's default.
+	LLMThinkingBudget int
 	// LLMConcurrency is the number of jobs run in parallel; match
 	// llama-server's --parallel.
 	LLMConcurrency int
@@ -109,6 +112,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if c.LLMContextTokens, err = getEnvInt("LLM_CONTEXT_TOKENS", 0); err != nil {
+		return Config{}, err
+	}
+	if c.LLMThinkingBudget, err = getEnvInt("LLM_THINKING_BUDGET", 0); err != nil {
 		return Config{}, err
 	}
 	if c.LLMConcurrency, err = getEnvPositiveInt("LLM_CONCURRENCY", 1); err != nil {
