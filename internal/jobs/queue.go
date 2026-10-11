@@ -112,12 +112,17 @@ func (q *Queue) Enqueue(ctx context.Context, nj NewJob) (Job, bool, error) {
 	}
 	q.mu.Unlock()
 	if created {
-		select {
-		case q.wake <- struct{}{}:
-		default:
-		}
+		q.signal()
 	}
 	return job, created, nil
+}
+
+// signal wakes an idle worker, if any.
+func (q *Queue) signal() {
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Run recovers interrupted jobs, then processes jobs until ctx is done.
@@ -175,6 +180,8 @@ func (q *Queue) process(ctx context.Context, job *Job) {
 
 	start := time.Now()
 	log.InfoContext(ctx, "job started")
+	// Jobs of the same group wait for this one: wake a worker when it ends.
+	defer q.signal()
 	result, err := q.handle(jobCtx, job)
 	if ctx.Err() != nil {
 		log.WarnContext(ctx, "job interrupted by shutdown; it will be requeued on restart")

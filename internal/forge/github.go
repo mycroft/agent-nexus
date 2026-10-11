@@ -250,32 +250,129 @@ func (g *GitHub) GetPR(ctx context.Context, repo Repo, number int) (PR, error) {
 	}, nil
 }
 
+type githubReview struct {
+	ID          int64      `json:"id"`
+	User        githubUser `json:"user"`
+	Body        string     `json:"body"`
+	State       string     `json:"state"`
+	CommitID    string     `json:"commit_id"`
+	SubmittedAt time.Time  `json:"submitted_at"`
+}
+
+// getPages fetches every page of a list endpoint (path without query).
+func getPages[T any](ctx context.Context, g *GitHub, auth func(*http.Request), path string) ([]T, error) {
+	var all []T
+	for page := 1; ; page++ {
+		var items []T
+		if err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("%s?per_page=%d&page=%d", path, githubPageSize, page), auth, nil, &items); err != nil {
+			return nil, fmt.Errorf("github: %w", err)
+		}
+		all = append(all, items...)
+		if len(items) < githubPageSize {
+			return all, nil
+		}
+	}
+}
+
 // ListReviews implements Forge.
 func (g *GitHub) ListReviews(ctx context.Context, repo Repo, number int) ([]Review, error) {
 	auth, err := g.repoAuth(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	var all []Review
-	for page := 1; ; page++ {
-		var reviews []struct {
-			ID       int64      `json:"id"`
-			User     githubUser `json:"user"`
-			Body     string     `json:"body"`
-			State    string     `json:"state"`
-			CommitID string     `json:"commit_id"`
-		}
-		path := fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=%d&page=%d", repo, number, githubPageSize, page)
-		if err := g.api.do(ctx, http.MethodGet, path, auth, nil, &reviews); err != nil {
-			return nil, fmt.Errorf("github: %w", err)
-		}
-		for _, r := range reviews {
-			all = append(all, Review{ID: r.ID, User: r.User.Login, Body: r.Body, State: r.State, CommitID: r.CommitID})
-		}
-		if len(reviews) < githubPageSize {
-			return all, nil
+	reviews, err := getPages[githubReview](ctx, g, auth, fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, number))
+	if err != nil {
+		return nil, err
+	}
+	all := make([]Review, 0, len(reviews))
+	for _, r := range reviews {
+		all = append(all, Review{ID: r.ID, User: r.User.Login, Body: r.Body, State: r.State, CommitID: r.CommitID})
+	}
+	return all, nil
+}
+
+// ListNotes implements Forge. A reply to an inline comment points at the
+// first comment of its thread with in_reply_to_id.
+func (g *GitHub) ListNotes(ctx context.Context, repo Repo, number int) ([]Note, error) {
+	auth, err := g.repoAuth(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	reviews, err := getPages[githubReview](ctx, g, auth, fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, number))
+	if err != nil {
+		return nil, err
+	}
+	var notes []Note
+	for _, r := range reviews {
+		if r.State != "PENDING" && strings.TrimSpace(r.Body) != "" {
+			notes = append(notes, Note{Kind: NoteReview, ID: r.ID, User: r.User.Login, Body: r.Body, CreatedAt: r.SubmittedAt})
 		}
 	}
+	type reviewComment struct {
+		ID        int64      `json:"id"`
+		User      githubUser `json:"user"`
+		Body      string     `json:"body"`
+		Path      string     `json:"path"`
+		Line      int        `json:"line"`
+		InReplyTo int64      `json:"in_reply_to_id"`
+		CreatedAt time.Time  `json:"created_at"`
+	}
+	inline, err := getPages[reviewComment](ctx, g, auth, fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, number))
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range inline {
+		root := c.ID
+		if c.InReplyTo != 0 {
+			root = c.InReplyTo
+		}
+		notes = append(notes, Note{
+			Kind: NoteInline, ID: c.ID, User: c.User.Login, Body: c.Body,
+			Path: c.Path, Line: c.Line, Thread: strconv.FormatInt(root, 10), CreatedAt: c.CreatedAt,
+		})
+	}
+	type issueComment struct {
+		ID        int64      `json:"id"`
+		User      githubUser `json:"user"`
+		Body      string     `json:"body"`
+		CreatedAt time.Time  `json:"created_at"`
+	}
+	comments, err := getPages[issueComment](ctx, g, auth, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number))
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range comments {
+		notes = append(notes, Note{Kind: NoteComment, ID: c.ID, User: c.User.Login, Body: c.Body, CreatedAt: c.CreatedAt})
+	}
+	sortNotes(notes)
+	return notes, nil
+}
+
+// ReplyInline implements Forge. GitHub only accepts replies to the first
+// comment of a thread.
+func (g *GitHub) ReplyInline(ctx context.Context, repo Repo, number int, root Note, body string) error {
+	auth, err := g.repoAuth(ctx, repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/pulls/%d/comments/%d/replies", repo, number, root.ID)
+	if err := g.api.do(ctx, http.MethodPost, path, auth, map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("github: reply to comment %d: %w", root.ID, err)
+	}
+	return nil
+}
+
+// Comment implements Forge.
+func (g *GitHub) Comment(ctx context.Context, repo Repo, number int, body string) error {
+	auth, err := g.repoAuth(ctx, repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number)
+	if err := g.api.do(ctx, http.MethodPost, path, auth, map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("github: comment: %w", err)
+	}
+	return nil
 }
 
 // DeletePendingReviews implements Forge. GitHub validates a review as a

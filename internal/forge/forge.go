@@ -12,7 +12,9 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
 	"github.com/mycroft/agent-nexus/internal/httpclient"
@@ -92,6 +94,37 @@ type NewReview struct {
 	Comments  []Comment `json:"comments"`
 }
 
+// NoteKind tells where a discussion note lives.
+type NoteKind string
+
+// Note kinds.
+const (
+	// NoteReview is the body of a submitted review.
+	NoteReview NoteKind = "review"
+	// NoteInline is a comment on a line of the diff, or a reply to one.
+	NoteInline NoteKind = "inline"
+	// NoteComment is a pull request comment.
+	NoteComment NoteKind = "comment"
+)
+
+// Note is one message of a pull request discussion.
+type Note struct {
+	Kind NoteKind
+	ID   int64
+	User string
+	Body string
+	// Path and Line locate inline notes; Line is the new-side line, 0 when
+	// the comment is on a removed line.
+	Path string
+	Line int
+	// Thread groups an inline note with the replies to it.
+	Thread    string
+	CreatedAt time.Time
+}
+
+// Key identifies a note: IDs of different kinds may collide.
+func (n Note) Key() string { return fmt.Sprintf("%s:%d", n.Kind, n.ID) }
+
 // Forge is a code-hosting platform.
 type Forge interface {
 	// Name is the short platform name ("gitea", "github").
@@ -106,8 +139,21 @@ type Forge interface {
 	// after a failed submission.
 	DeletePendingReviews(ctx context.Context, repo Repo, number int) error
 	CreateReview(ctx context.Context, repo Repo, number int, review NewReview) error
+	// ListNotes returns the discussion of a pull request, oldest first:
+	// bodies of submitted reviews, inline comments with their replies, and
+	// pull request comments.
+	ListNotes(ctx context.Context, repo Repo, number int) ([]Note, error)
+	// ReplyInline replies in the thread started by the inline note root.
+	ReplyInline(ctx context.Context, repo Repo, number int, root Note, body string) error
+	// Comment posts a pull request comment.
+	Comment(ctx context.Context, repo Repo, number int, body string) error
 	// GitRemote returns fetch coordinates and credentials for repo.
 	GitRemote(ctx context.Context, repo Repo) (gitrepo.Remote, error)
+}
+
+// sortNotes orders notes oldest first, keeping the forge's order for ties.
+func sortNotes(notes []Note) {
+	sort.SliceStable(notes, func(i, j int) bool { return notes[i].CreatedAt.Before(notes[j].CreatedAt) })
 }
 
 // apiClient is the JSON-over-HTTP plumbing shared by both forges.

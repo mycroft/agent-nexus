@@ -170,8 +170,8 @@ func TestDraftAndPost(t *testing.T) {
 		t.Errorf("grep tool result = %+v", toolResult)
 	}
 	final := f.llm.requests[2]
-	if final.Schema == nil || len(final.Tools) != 0 {
-		t.Error("final request must be schema-constrained without tools")
+	if final.Schema != nil || len(final.Tools) != len(f.llm.requests[0].Tools) {
+		t.Error("the final request must keep the tool loop's shape, for llama-server's prompt cache")
 	}
 
 	// Line 5 and 13 are new-side diff lines; other.go is not in the diff;

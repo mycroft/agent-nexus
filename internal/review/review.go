@@ -12,13 +12,11 @@ import (
 	"strings"
 
 	"github.com/mycroft/agent-nexus/internal/agent"
-	"github.com/mycroft/agent-nexus/internal/diff"
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
 	"github.com/mycroft/agent-nexus/internal/skill"
-	"github.com/mycroft/agent-nexus/internal/tools"
 )
 
 // Kind is the job kind handled by this package.
@@ -73,13 +71,15 @@ type Draft struct {
 
 // Reviewer produces and posts reviews.
 type Reviewer struct {
-	Forges        map[string]forge.Forge
-	Repos         *gitrepo.Cache
-	LLM           agent.Completer
-	Model         string
-	Skill         skill.Skill
-	ContextTokens int
-	MaxTurns      int
+	Forges map[string]forge.Forge
+	Repos  *gitrepo.Cache
+	LLM    agent.Completer
+	Model  string
+	Skill  skill.Skill
+	// DiscussionSkill guides answers to replies and mentions.
+	DiscussionSkill skill.Skill
+	ContextTokens   int
+	MaxTurns        int
 	// ModeRules is the central review mode configuration (see resolveMode).
 	ModeRules []ModeRule
 	Logger    *slog.Logger
@@ -197,73 +197,12 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		return nil, o, nil
 	}
 
-	remote, err := f.GitRemote(ctx, repoID)
-	if err != nil {
-		return nil, "", err
+	ws, outcome, err := r.prepare(ctx, f, repoID, pr, req.HeadSHA)
+	if err != nil || ws == nil {
+		return nil, outcome, err
 	}
-	repo, err := r.Repos.Sync(ctx, remote, pr.BaseRef, pr.Number)
-	if err != nil {
-		return nil, "", err
-	}
-	if !repo.HasCommit(ctx, req.HeadSHA) {
-		// The pull request was force-pushed between reading it and
-		// fetching: a newer event covers the new head.
-		return nil, Stale, nil
-	}
-	baseSHA, err := repo.ResolveBranch(ctx, pr.BaseRef)
-	if err != nil {
-		return nil, "", err
-	}
-	rawDiff, err := repo.Diff(ctx, baseSHA, req.HeadSHA)
-	if errors.Is(err, gitrepo.ErrTruncated) {
-		return nil, "", fmt.Errorf("diff exceeds %d bytes; too large to review", gitrepo.MaxOutput)
-	}
-	if err != nil {
-		return nil, "", err
-	}
-	files, err := diff.Parse(rawDiff)
-	if err != nil {
-		return nil, "", fmt.Errorf("parse diff: %w", err)
-	}
-
-	peek := func(path string) []byte {
-		content, err := repo.ReadFile(ctx, req.HeadSHA, path)
-		if err != nil {
-			return nil
-		}
-		return content[:min(len(content), headPeekBytes)]
-	}
-	budget := int(float64(r.ContextTokens) * diffBudgetShare * charsPerToken)
-	changed := selectDiffs(files, budget, peek)
-
-	mode, modeSource, configWarning := r.reviewMode(ctx, repo, baseSHA, repoID)
+	mode, modeSource, configWarning := r.reviewMode(ctx, ws.repo, ws.baseSHA, repoID)
 	r.logger().InfoContext(ctx, "review mode", "repo", repoID.String(), "mode", mode, "source", modeSource)
-
-	guidanceName, guidance := "", ""
-	for _, name := range guidanceFiles {
-		if content, err := repo.ReadFile(ctx, baseSHA, name); err == nil {
-			guidanceName, guidance = name, string(content)
-			break
-		}
-	}
-
-	byPath := map[string]*diff.File{}
-	for _, file := range files {
-		byPath[file.Path()] = file
-		if file.Status == diff.Renamed {
-			byPath[file.OldPath] = file
-		}
-	}
-	fileDiff := func(path string) (string, bool) {
-		file, ok := byPath[path]
-		if !ok {
-			return "", false
-		}
-		if file.Binary {
-			return "binary file; no textual diff", true
-		}
-		return file.Annotated(), true
-	}
 
 	runner := &agent.Runner{
 		LLM:           r.LLM,
@@ -273,9 +212,9 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		Record:        record,
 		Logger:        r.Logger,
 	}
-	system := systemPrompt(r.Skill.Body, repoID, f.Name(), pr, guidanceName, guidance)
-	user := userPrompt(repoID, f.Name(), pr, baseSHA, changed)
-	session, err := runner.Run(ctx, system, user, tools.Repo(repo, req.HeadSHA, fileDiff))
+	system := systemPrompt(r.Skill.Body, repoID, f.Name(), pr, ws.guidanceName, ws.guidance)
+	user := userPrompt(repoID, f.Name(), pr, ws.baseSHA, ws.changed(ctx)) + r.earlierDiscussion(ctx, f, repoID, pr.Number)
+	session, err := runner.Run(ctx, system, user, ws.tools())
 	if err != nil {
 		return nil, "", fmt.Errorf("agent: %w", err)
 	}
@@ -298,7 +237,7 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		event, note := verdictEvent(out)
 		v = &verdict{Event: event, Reason: out.VerdictReason, Note: note}
 	}
-	review, fallback := render(out, files, footer{
+	review, fallback := render(out, ws.files, footer{
 		HeadSHA:          req.HeadSHA,
 		Model:            r.Model,
 		Turns:            session.Turns,

@@ -4,10 +4,13 @@ package forgetest
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
+	"github.com/mycroft/agent-nexus/internal/httpclient"
 )
 
 // Fake is an in-memory forge.Forge.
@@ -27,7 +30,14 @@ type Fake struct {
 	// RejectVerdicts fails approvals and change requests, like a forge
 	// where the bot may only comment.
 	RejectVerdicts bool
+	// RejectComments fails pull request comments, like a Gitea token
+	// without the write:issue scope.
+	RejectComments bool
 	created        []forge.NewReview
+	notes          []forge.Note
+	nextID         int64
+	// Replies records inline replies and comments posted by the bot.
+	replies []forge.Note
 }
 
 // New returns a fake forge.
@@ -47,6 +57,32 @@ func (f *Fake) AddReview(r forge.Review) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reviews = append(f.reviews, r)
+}
+
+// AddNote adds a discussion note; its ID is assigned when zero.
+func (f *Fake) AddNote(n forge.Note) forge.Note {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.addNote(n)
+}
+
+func (f *Fake) addNote(n forge.Note) forge.Note {
+	f.nextID++
+	if n.ID == 0 {
+		n.ID = 1000 + f.nextID
+	}
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = time.Date(2026, 1, 1, 0, 0, int(f.nextID), 0, time.UTC)
+	}
+	f.notes = append(f.notes, n)
+	return n
+}
+
+// Replies returns the inline replies and comments posted so far.
+func (f *Fake) Replies() []forge.Note {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]forge.Note(nil), f.replies...)
 }
 
 // Created returns the reviews created so far.
@@ -109,6 +145,35 @@ func (f *Fake) CreateReview(_ context.Context, _ forge.Repo, _ int, r forge.NewR
 	}
 	f.created = append(f.created, r)
 	f.reviews = append(f.reviews, forge.Review{ID: int64(len(f.reviews) + 1), User: f.Login, Body: r.Body, State: "COMMENT", CommitID: r.CommitSHA})
+	f.addNote(forge.Note{Kind: forge.NoteReview, User: f.Login, Body: r.Body})
+	return nil
+}
+
+// ListNotes implements forge.Forge.
+func (f *Fake) ListNotes(context.Context, forge.Repo, int) ([]forge.Note, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]forge.Note(nil), f.notes...), nil
+}
+
+// ReplyInline implements forge.Forge.
+func (f *Fake) ReplyInline(_ context.Context, _ forge.Repo, _ int, root forge.Note, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := f.addNote(forge.Note{Kind: forge.NoteInline, User: f.Login, Body: body, Path: root.Path, Line: root.Line, Thread: root.Thread})
+	f.replies = append(f.replies, n)
+	return nil
+}
+
+// Comment implements forge.Forge.
+func (f *Fake) Comment(_ context.Context, _ forge.Repo, _ int, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.RejectComments {
+		return &httpclient.StatusError{StatusCode: http.StatusForbidden, Status: "403 Forbidden", Body: "token does not have the write:issue scope"}
+	}
+	n := f.addNote(forge.Note{Kind: forge.NoteComment, User: f.Login, Body: body})
+	f.replies = append(f.replies, n)
 	return nil
 }
 

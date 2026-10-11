@@ -30,6 +30,9 @@ workflow ──POST /v1/events/pr-review──▶ API (API key, owner allowlist,
 - **Idempotent posting.** Each review carries a hidden marker with the
   commit SHA. A job that is retried, or recovered after a crash, never
   posts twice.
+- **Answers replies.** agent-nexus answers replies in its own review threads,
+  and comments that mention `@agent-nexus`. Its later reviews take the
+  discussion into account (see [Discussion](#discussion)).
 - **Comment or verdict, per repository.** By default a review is a plain
   comment. Repositories in verdict mode get an approval, a comment or a
   change request instead (see [Review modes](#review-modes)).
@@ -130,6 +133,36 @@ On Gitea, an approval counts toward branch protection only when the
 reviewer has write access or is in the approvals allowlist. A read-only
 bot's approvals are shown but are not "official".
 
+## Discussion
+
+agent-nexus answers:
+
+- **Replies in an inline thread it took part in.** It answers in the
+  thread.
+- **Comments that mention `@agent-nexus`.** This covers PR comments,
+  review bodies and inline comments. It answers with a PR comment that
+  quotes the message.
+
+It doesn't use the comment that triggered the event. Each pass reads the
+whole discussion and answers what is still waiting, so a missed event is
+caught up by the next one:
+
+- One answer covers every pending message of a thread.
+- Each answer carries a hidden `<!-- agent-nexus:reply-to=… -->` marker,
+  so nothing is answered twice.
+- At most three conversations are answered per pass.
+
+Answers follow [`skills/pr-discussion/SKILL.md`](skills/pr-discussion/SKILL.md).
+The agent checks the reply against the code with the same read-only tools,
+then either withdraws the finding or keeps it, with evidence.
+
+A new review also reads the earlier discussion: its previous reviews,
+the threads it took part in, and the PR comments. It doesn't repeat a
+finding that was answered convincingly or fixed since.
+
+PR comments need the Gitea token to have the `write:issue` scope. Without
+it, agent-nexus answers mentions with a comment-only review instead.
+
 ## API
 
 All `/v1` routes require `Authorization: Bearer <api key>`.
@@ -138,6 +171,12 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
   - `202` with `{"job_id"}` when the review is queued.
   - `200` when it is a duplicate of a live or finished job, when the
     event is stale, or when the PR is a draft or closed.
+- `POST /v1/events/pr-comment` takes `{"server_url", "repo", "pr"}`. It
+  queues a pass over the pull request's discussion, which answers what is
+  waiting for the bot.
+  - `202` with `{"job_id"}`. A newer event replaces a queued pass; a running
+    pass finishes.
+  - `200` when the PR is closed.
 - `GET /v1/jobs/{id}` returns the job's status, result or error, and
   token usage.
 - `GET /v1/jobs/{id}/steps` returns the agent transcript: prompts, tool
@@ -189,15 +228,20 @@ Pushing a `vX.Y.Z` tag releases both artifacts:
 1. **Bot account.** Create an `agent-nexus` bot account (Site
    Administration → User Accounts → Create, user type *Bot*) and give it
    read access to the private repositories. From the bot's admin page,
-   create a token with `write:repository` scope (to fetch the code and post
-   reviews) and `read:user` scope (to look up its own login). Set
-   `GITEA_USER` and `GITEA_TOKEN`.
+   create a token with these scopes, then set `GITEA_USER` and
+   `GITEA_TOKEN`:
+   - `write:repository`, to fetch the code, post reviews and reply in
+     threads;
+   - `read:user`, to look up its own login;
+   - optionally `write:issue`, to answer mentions with a PR comment
+     instead of a review.
 2. **Actions secret.** Add a user-level Actions secret named
    `AGENT_NEXUS_API_KEY` with one of the `API_KEYS` values.
 3. **Scoped workflow.** Register
    [`.gitea/scoped_workflows/pr-review.yaml`](.gitea/scoped_workflows/pr-review.yaml)
    under User Settings → Actions → Scoped Workflows. It then runs on every
-   repository you own, and a repository can opt out.
+   repository you own, and a repository can opt out. It sends pull request
+   events to `pr-review`, and comment and review events to `pr-comment`.
 4. **GitHub mirror.** Push-mirror this repository to
    `github.com/mycroft/agent-nexus`, so GitHub repositories can use the
    reusable workflow.
@@ -216,13 +260,17 @@ Pushing a `vX.Y.Z` tag releases both artifacts:
    caller workflow:
 
 ```yaml
-name: Review
+name: agent-nexus
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
 jobs:
-  review:
-    if: ${{ !github.event.pull_request.draft }}
+  agent-nexus:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     uses: mycroft/agent-nexus/.github/workflows/pr-review.yaml@main
     secrets:
       AGENT_NEXUS_API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}

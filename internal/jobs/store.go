@@ -65,9 +65,12 @@ type NewJob struct {
 	// a new job supersedes the group's older unfinished jobs.
 	GroupKey string
 	// DedupeKey identifies identical work (e.g. one pull request commit).
-	DedupeKey  string
-	APIKeyName string
-	Payload    any
+	DedupeKey string
+	// KeepRunning limits superseding to queued jobs: a running job of the
+	// group finishes.
+	KeepRunning bool
+	APIKeyName  string
+	Payload     any
 }
 
 // Step is one transcript entry of a job.
@@ -187,7 +190,7 @@ func (s *Store) Enqueue(ctx context.Context, nj NewJob) (Job, bool, []int64, err
 	}
 
 	now := s.now()
-	cancel, err := supersede(ctx, tx, nj.GroupKey, now)
+	cancel, err := supersede(ctx, tx, nj.GroupKey, nj.KeepRunning, now)
 	if err != nil {
 		return Job{}, false, nil, err
 	}
@@ -205,12 +208,13 @@ func (s *Store) Enqueue(ctx context.Context, nj NewJob) (Job, bool, []int64, err
 	return job, true, cancel, nil
 }
 
-// supersede marks the group's queued and running jobs superseded and
-// returns the IDs of those that had started.
-func supersede(ctx context.Context, tx *sql.Tx, group string, now time.Time) ([]int64, error) {
+// supersede marks the group's queued jobs, and running ones unless
+// keepRunning, superseded. It returns the IDs of those that had started.
+func supersede(ctx context.Context, tx *sql.Tx, group string, keepRunning bool, now time.Time) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx, `UPDATE jobs SET status = 'superseded', finished_at = ?
-		WHERE group_key = ? AND status IN ('queued', 'running') RETURNING id, (started_at IS NOT NULL)`,
-		formatTime(now), group)
+		WHERE group_key = ? AND (status = 'queued' OR (status = 'running' AND NOT ?))
+		RETURNING id, (started_at IS NOT NULL)`,
+		formatTime(now), group, keepRunning)
 	if err != nil {
 		return nil, fmt.Errorf("supersede older jobs: %w", err)
 	}
@@ -233,11 +237,14 @@ func supersede(ctx context.Context, tx *sql.Tx, group string, now time.Time) ([]
 }
 
 // Claim marks the oldest queued job as running and returns it, or nil
-// when the queue is empty.
+// when no job can start. A job waits while another job of its group is
+// running or posting, so jobs about one subject never run concurrently.
 func (s *Store) Claim(ctx context.Context) (*Job, error) {
 	job, err := scanJob(s.db.QueryRowContext(ctx, `UPDATE jobs
 		SET status = 'running', started_at = ?, attempts = attempts + 1
-		WHERE id = (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1)
+		WHERE id = (SELECT q.id FROM jobs q WHERE q.status = 'queued'
+			AND NOT EXISTS (SELECT 1 FROM jobs b WHERE b.group_key = q.group_key AND b.status IN ('running', 'posting'))
+			ORDER BY q.id LIMIT 1)
 		RETURNING `+jobColumns, formatTime(s.now())))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil //nolint:nilnil // an empty queue is not an error

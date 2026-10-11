@@ -233,3 +233,54 @@ func TestQueueRunsAndSupersedes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClaimSerializesGroups(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	pass := func(n string) NewJob {
+		return NewJob{Kind: "k", GroupKey: "pr1:discussion", DedupeKey: "pr1@" + n, KeepRunning: true, Payload: n}
+	}
+	first, _, _, _ := s.Enqueue(ctx, pass("1"))
+	if got, err := s.Claim(ctx); err != nil || got.ID != first.ID {
+		t.Fatalf("Claim = %+v, %v", got, err)
+	}
+	second, _, _, _ := s.Enqueue(ctx, pass("2"))
+	other, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "pr2", DedupeKey: "pr2@1", Payload: 1})
+
+	// The second pass of pr1 waits; another group's job does not.
+	if got, err := s.Claim(ctx); err != nil || got == nil || got.ID != other.ID {
+		t.Fatalf("Claim = %+v, %v; want the other group's job", got, err)
+	}
+	if got, err := s.Claim(ctx); err != nil || got != nil {
+		t.Fatalf("Claim = %+v, %v; want nothing while pr1 runs", got, err)
+	}
+	if _, err := s.Finish(ctx, first.ID, Succeeded, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Claim(ctx); err != nil || got == nil || got.ID != second.ID {
+		t.Fatalf("Claim = %+v, %v; want the second pass once the first finished", got, err)
+	}
+}
+
+func TestKeepRunning(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	pass := func(n string) NewJob {
+		return NewJob{Kind: "k", GroupKey: "g:discussion", DedupeKey: "g:discussion@" + n, KeepRunning: true, Payload: n}
+	}
+	running, _, _, _ := s.Enqueue(ctx, pass("1"))
+	if _, err := s.Claim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	queued, _, _, _ := s.Enqueue(ctx, pass("2"))
+	_, created, cancel, err := s.Enqueue(ctx, pass("3"))
+	if err != nil || !created || len(cancel) != 0 {
+		t.Fatalf("enqueue = %v, %v, cancel %v", created, err, cancel)
+	}
+	if got, _ := s.Get(ctx, running.ID); got.Status != Running {
+		t.Errorf("running job = %s, want it kept running", got.Status)
+	}
+	if got, _ := s.Get(ctx, queued.ID); got.Status != Superseded {
+		t.Errorf("queued job = %s, want superseded", got.Status)
+	}
+}

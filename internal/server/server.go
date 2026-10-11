@@ -46,13 +46,15 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.Handle("POST /v1/events/pr-review", s.Keys.Middleware(http.HandlerFunc(s.prReviewEvent)))
+	mux.Handle("POST /v1/events/pr-comment", s.Keys.Middleware(http.HandlerFunc(s.prCommentEvent)))
 	mux.Handle("GET /v1/jobs/{id}", s.Keys.Middleware(http.HandlerFunc(s.getJob)))
 	mux.Handle("GET /v1/jobs/{id}/steps", s.Keys.Middleware(http.HandlerFunc(s.getSteps)))
 	return mux
 }
 
-// PREvent is the body of POST /v1/events/pr-review, as sent by the
-// workflows.
+// PREvent is the body of POST /v1/events/pr-review and
+// /v1/events/pr-comment, as sent by the workflows. pr-comment events have
+// no head_sha.
 type PREvent struct {
 	// ServerURL is the forge web root (${{ github.server_url }}).
 	ServerURL string `json:"server_url"`
@@ -62,89 +64,147 @@ type PREvent struct {
 	HeadSHA string `json:"head_sha"`
 }
 
-func (s *Server) prReviewEvent(w http.ResponseWriter, r *http.Request) {
+// checkedEvent is a validated event: its body, and its forge, repository and
+// pull request as read from the forge.
+type checkedEvent struct {
+	body  PREvent
+	forge forge.Forge
+	repo  forge.Repo
+	pr    forge.PR
+	log   *slog.Logger
+}
+
+// readEvent decodes an event body, validates its identifiers and reads the
+// pull request from the forge: only identifiers come from the caller. On
+// failure it writes the response and returns nil.
+func (s *Server) readEvent(w http.ResponseWriter, r *http.Request) *checkedEvent {
 	ctx := r.Context()
 	var ev PREvent
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&ev); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
+		return nil
 	}
 	repo, err := forge.ParseRepo(ev.Repo)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil
 	}
 	if ev.PR <= 0 {
 		writeError(w, http.StatusBadRequest, "pr must be a positive pull request number")
-		return
-	}
-	if !shaPattern.MatchString(ev.HeadSHA) {
-		writeError(w, http.StatusBadRequest, "head_sha must be a full lowercase hex commit SHA")
-		return
+		return nil
 	}
 	f := s.forgeFor(ev.ServerURL)
 	if f == nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown server_url %q", ev.ServerURL))
-		return
+		return nil
 	}
 	if !slices.ContainsFunc(s.AllowedOwners, func(o string) bool { return strings.EqualFold(o, repo.Owner) }) {
 		writeError(w, http.StatusForbidden, fmt.Sprintf("owner %q is not allowed", repo.Owner))
-		return
+		return nil
 	}
-	log := s.Logger.With("forge", f.Name(), "repo", repo.String(), "pr", ev.PR, "head_sha", ev.HeadSHA, "key", auth.KeyName(ctx))
+	log := s.Logger.With("forge", f.Name(), "repo", repo.String(), "pr", ev.PR, "key", auth.KeyName(ctx))
 
-	// Only identifiers come from the caller; the pull request itself is
-	// read from the forge. This also drops late events: an event for a
-	// commit that is no longer the head must not supersede a newer job.
 	forgeCtx, cancel := context.WithTimeout(ctx, forgeTimeout)
 	defer cancel()
 	pr, err := f.GetPR(forgeCtx, repo, ev.PR)
 	switch {
 	case errors.Is(err, forge.ErrNotFound):
 		writeError(w, http.StatusNotFound, "pull request not found")
-		return
+		return nil
 	case err != nil:
 		log.ErrorContext(ctx, "get pull request", "error", err)
 		writeError(w, http.StatusBadGateway, "could not read the pull request from the forge")
+		return nil
+	}
+	if pr.State != "open" {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored", "reason": "pull request is not open"})
+		return nil
+	}
+	return &checkedEvent{body: ev, forge: f, repo: repo, pr: pr, log: log}
+}
+
+func groupKey(f forge.Forge, repo forge.Repo, pr int) string {
+	return fmt.Sprintf("%s:%s#%d", f.Name(), strings.ToLower(repo.String()), pr)
+}
+
+func (s *Server) prReviewEvent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	ev := s.readEvent(w, r)
+	if ev == nil {
 		return
 	}
+	body := ev.body
+	if !shaPattern.MatchString(body.HeadSHA) {
+		writeError(w, http.StatusBadRequest, "head_sha must be a full lowercase hex commit SHA")
+		return
+	}
+	log := ev.log.With("head_sha", body.HeadSHA)
 	switch {
-	case pr.HeadSHA != ev.HeadSHA:
-		log.InfoContext(ctx, "ignoring stale event", "current_head_sha", pr.HeadSHA)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "stale", "current_head_sha": pr.HeadSHA})
+	case ev.pr.HeadSHA != body.HeadSHA:
+		// A late event must not supersede the job of a newer commit.
+		log.InfoContext(ctx, "ignoring stale event", "current_head_sha", ev.pr.HeadSHA)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "stale", "current_head_sha": ev.pr.HeadSHA})
 		return
-	case pr.State != "open":
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored", "reason": "pull request is not open"})
-		return
-	case pr.Draft:
+	case ev.pr.Draft:
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored", "reason": "pull request is a draft"})
 		return
 	}
 
-	group := fmt.Sprintf("%s:%s#%d", f.Name(), strings.ToLower(repo.String()), ev.PR)
-	job, created, err := s.Queue.Enqueue(ctx, jobs.NewJob{
+	group := groupKey(ev.forge, ev.repo, body.PR)
+	s.enqueue(w, r, log, "review", jobs.NewJob{
 		Kind:       review.Kind,
 		GroupKey:   group,
-		DedupeKey:  group + "@" + ev.HeadSHA,
+		DedupeKey:  group + "@" + body.HeadSHA,
 		APIKeyName: auth.KeyName(ctx),
 		Payload: review.Request{
-			Forge:   f.Name(),
-			Owner:   repo.Owner,
-			Repo:    repo.Name,
-			PR:      ev.PR,
-			HeadSHA: ev.HeadSHA,
+			Forge:   ev.forge.Name(),
+			Owner:   ev.repo.Owner,
+			Repo:    ev.repo.Name,
+			PR:      body.PR,
+			HeadSHA: body.HeadSHA,
 		},
 	})
+}
+
+// prCommentEvent queues a pass over the pull request's discussion, which
+// answers the replies and mentions waiting for the bot. Each event gets its
+// own job: a newer one replaces a queued one, and a running one finishes.
+func (s *Server) prCommentEvent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	ev := s.readEvent(w, r)
+	if ev == nil {
+		return
+	}
+	body := ev.body
+	group := groupKey(ev.forge, ev.repo, body.PR) + ":discussion"
+	s.enqueue(w, r, ev.log, "discussion", jobs.NewJob{
+		Kind:        review.DiscussionKind,
+		GroupKey:    group,
+		DedupeKey:   fmt.Sprintf("%s@%d", group, time.Now().UnixNano()),
+		KeepRunning: true,
+		APIKeyName:  auth.KeyName(ctx),
+		Payload: review.DiscussionRequest{
+			Forge: ev.forge.Name(),
+			Owner: ev.repo.Owner,
+			Repo:  ev.repo.Name,
+			PR:    body.PR,
+		},
+	})
+}
+
+func (s *Server) enqueue(w http.ResponseWriter, r *http.Request, log *slog.Logger, what string, nj jobs.NewJob) {
+	ctx := r.Context()
+	job, created, err := s.Queue.Enqueue(ctx, nj)
 	if err != nil {
-		log.ErrorContext(ctx, "enqueue review", "error", err)
-		writeError(w, http.StatusInternalServerError, "could not enqueue the review")
+		log.ErrorContext(ctx, "enqueue "+what, "error", err)
+		writeError(w, http.StatusInternalServerError, "could not enqueue the "+what)
 		return
 	}
 	if !created {
 		writeJSON(w, http.StatusOK, map[string]any{"status": job.Status, "job_id": job.ID, "duplicate": true})
 		return
 	}
-	log.InfoContext(ctx, "review queued", "job", job.ID)
+	log.InfoContext(ctx, what+" queued", "job", job.ID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": job.Status, "job_id": job.ID})
 }
 
