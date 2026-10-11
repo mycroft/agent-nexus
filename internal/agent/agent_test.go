@@ -154,6 +154,38 @@ func TestRunStopsBeforeTheDeadline(t *testing.T) {
 	}
 }
 
+func TestFinishFallsBackWhenTimeRunsOut(t *testing.T) {
+	base := time.Now()
+	now := base
+	slow := func(content string) func(llm.Request) (llm.Completion, error) {
+		return func(llm.Request) (llm.Completion, error) {
+			now = now.Add(2 * time.Minute)
+			return llm.Completion{Message: llm.Message{Content: content}}, nil
+		}
+	}
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){slow("Done investigating."), slow("not json"), slow(`{"ok":true}`)}}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 20, now: func() time.Time { return now }}
+	ctx, cancel := context.WithDeadline(context.Background(), base.Add(6*time.Minute))
+	defer cancel()
+
+	s, err := r.Run(ctx, "sys", "user", []tools.Tool{echo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The model answers after one turn, 4 minutes before the deadline.
+	// Its answer is rejected 2 minutes before: short of another 2-minute
+	// attempt and the margin.
+	if err := s.Finish(ctx, "Answer.", llm.JSONSchema{Name: "a", Schema: json.RawMessage(`{"type":"object"}`)}, okValidator); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.requests) != 3 {
+		t.Fatalf("%d requests, want the turn, one attempt and the fallback", len(fake.requests))
+	}
+	if last := fake.requests[2]; last.Schema == nil || !last.DisableThinking || len(last.Tools) != 0 {
+		t.Errorf("the retry is not the schema-constrained fallback: %+v", last)
+	}
+}
+
 func TestRunWithTooLittleTimeAnswersRightAway(t *testing.T) {
 	fake := &script{}
 	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 20}

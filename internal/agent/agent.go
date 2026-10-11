@@ -95,7 +95,7 @@ type Session struct {
 	calls map[string]int
 	// repeatTurns counts consecutive turns made only of repeated calls.
 	repeatTurns int
-	// longestTurn is the slowest LLM call of the loop so far.
+	// longestTurn is the slowest LLM call so far, of the loop or of Finish.
 	longestTurn time.Duration
 }
 
@@ -123,7 +123,8 @@ func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.T
 	r.record(Step{Role: "user", Content: user})
 
 	for s.Turns < r.MaxTurns {
-		if s.nearDeadline(ctx) {
+		// Leave time for this turn and the final answer.
+		if s.nearDeadline(ctx, 2) {
 			r.logger().WarnContext(ctx, "ending the investigation to answer before the deadline", "turns", s.Turns, "longest_turn", s.longestTurn.Round(time.Second))
 			break
 		}
@@ -156,15 +157,15 @@ func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.T
 }
 
 // nearDeadline reports whether the context's deadline leaves too little
-// time for another turn and the final answer, each estimated as long as
-// the slowest turn so far, plus a margin to post the result.
-func (s *Session) nearDeadline(ctx context.Context) bool {
+// time for the given number of LLM calls, each estimated as long as the
+// slowest call so far, plus a margin to post the result.
+func (s *Session) nearDeadline(ctx context.Context, calls int) bool {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return false
 	}
 	turn := max(s.longestTurn, minTurnEstimate)
-	return deadline.Sub(s.r.clock()) < 2*turn+deadlineMargin
+	return deadline.Sub(s.r.clock()) < time.Duration(calls)*turn+deadlineMargin
 }
 
 // Finish asks for the final answer, a JSON document matching schema, and
@@ -182,15 +183,25 @@ func (s *Session) nearDeadline(ctx context.Context) bool {
 // Tools stay declared, so the model may still call one: the call is
 // refused rather than run, since a new result only invites more
 // investigation.
+//
+// When the context's deadline leaves no time for another such call, a
+// rejected answer goes straight to the fallback: it does not think, so it
+// is quicker than a turn, and it always parses.
 func (s *Session) Finish(ctx context.Context, instruction string, schema llm.JSONSchema, validate func([]byte) error) error {
 	s.say(instruction + "\n\nReply with only a JSON object matching this JSON Schema, without a code fence and without calling a tool:\n" + string(schema.Schema))
 
 	var lastErr error
-	for range finishAttempts {
+	for attempt := range finishAttempts {
+		if attempt > 0 && s.nearDeadline(ctx, 1) {
+			s.r.logger().WarnContext(ctx, "no time left for another attempt", "error", lastErr)
+			break
+		}
+		start := s.r.clock()
 		comp, err := s.complete(ctx, llm.Request{Tools: s.defs})
 		if err != nil {
 			return err
 		}
+		s.longestTurn = max(s.longestTurn, s.r.clock().Sub(start))
 		msg := s.assistant(comp)
 		if len(msg.ToolCalls) > 0 {
 			// Answer the calls, so the conversation stays well formed.
