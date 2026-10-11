@@ -387,7 +387,7 @@ func TestHandleThroughQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	q := jobs.NewQueue(store, 1, time.Minute, time.Hour, quiet)
+	q := jobs.NewQueue(store, 1, 30*time.Minute, time.Hour, quiet)
 	q.Register(Kind, f.reviewer)
 	done := make(chan error)
 	go func() { done <- q.Run(ctx) }()

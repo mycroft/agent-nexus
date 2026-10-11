@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/mycroft/agent-nexus/internal/llm"
 	"github.com/mycroft/agent-nexus/internal/metrics"
@@ -31,6 +32,11 @@ const (
 	// turns whose tool calls all repeat earlier ones: at temperature 0 the
 	// same conversation keeps producing the same turn.
 	maxRepeatTurns = 2
+	// minTurnEstimate is the least time a turn is assumed to take when
+	// planning around the context's deadline.
+	minTurnEstimate = time.Minute
+	// deadlineMargin is left after the final answer, to post it.
+	deadlineMargin = 30 * time.Second
 )
 
 // Completer is the subset of *llm.Client the loop needs.
@@ -59,6 +65,8 @@ type Runner struct {
 	// Record, if set, receives every transcript step.
 	Record func(Step)
 	Logger *slog.Logger
+	// now is the clock; tests replace it.
+	now func() time.Time
 }
 
 // Session is a conversation in progress.
@@ -77,7 +85,8 @@ type Session struct {
 	// Turns is the number of LLM calls made by Run.
 	Turns int
 	// TurnLimitReached is set when Run cut the investigation short: at
-	// MaxTurns, or because the model kept repeating its tool calls.
+	// MaxTurns, because the model kept repeating its tool calls, or to
+	// leave time for the final answer before the context's deadline.
 	TurnLimitReached bool
 
 	charsPerToken float64
@@ -86,11 +95,15 @@ type Session struct {
 	calls map[string]int
 	// repeatTurns counts consecutive turns made only of repeated calls.
 	repeatTurns int
+	// longestTurn is the slowest LLM call of the loop so far.
+	longestTurn time.Duration
 }
 
 // Run starts a conversation and loops until the model answers without
-// calling a tool, or MaxTurns is reached. Hitting the turn limit is not an
-// error: the caller can still ask for a final answer with Finish.
+// calling a tool, MaxTurns is reached, or the context's deadline leaves
+// time for no more than the final answer. Cutting the investigation short
+// is not an error: the caller can still ask for a final answer with
+// Finish, instead of the job timing out with nothing to show.
 func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.Tool) (*Session, error) {
 	s := &Session{
 		r:             r,
@@ -110,10 +123,16 @@ func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.T
 	r.record(Step{Role: "user", Content: user})
 
 	for s.Turns < r.MaxTurns {
+		if s.nearDeadline(ctx) {
+			r.logger().WarnContext(ctx, "ending the investigation to answer before the deadline", "turns", s.Turns, "longest_turn", s.longestTurn.Round(time.Second))
+			break
+		}
+		start := r.clock()
 		comp, err := s.complete(ctx, llm.Request{Tools: s.defs})
 		if err != nil {
 			return s, err
 		}
+		s.longestTurn = max(s.longestTurn, r.clock().Sub(start))
 		s.Turns++
 		msg := s.assistant(comp)
 		if len(msg.ToolCalls) == 0 {
@@ -134,6 +153,18 @@ func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.T
 	}
 	s.TurnLimitReached = true
 	return s, nil
+}
+
+// nearDeadline reports whether the context's deadline leaves too little
+// time for another turn and the final answer, each estimated as long as
+// the slowest turn so far, plus a margin to post the result.
+func (s *Session) nearDeadline(ctx context.Context) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	turn := max(s.longestTurn, minTurnEstimate)
+	return deadline.Sub(s.r.clock()) < 2*turn+deadlineMargin
 }
 
 // Finish asks for the final answer, a JSON document matching schema, and
@@ -364,6 +395,13 @@ func (r *Runner) record(step Step) {
 	if r.Record != nil {
 		r.Record(step)
 	}
+}
+
+func (r *Runner) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 func (r *Runner) logger() *slog.Logger {

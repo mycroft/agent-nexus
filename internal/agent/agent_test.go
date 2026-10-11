@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mycroft/agent-nexus/internal/llm"
 	"github.com/mycroft/agent-nexus/internal/tools"
@@ -116,6 +117,51 @@ func TestRunStopsAtTurnLimit(t *testing.T) {
 	}
 	if !s.TurnLimitReached || s.Turns != 2 {
 		t.Fatalf("turns = %d, limit = %v", s.Turns, s.TurnLimitReached)
+	}
+}
+
+func TestRunStopsBeforeTheDeadline(t *testing.T) {
+	base := time.Now()
+	now := base
+	slowTurn := func(llm.Request) (llm.Completion, error) {
+		now = now.Add(2 * time.Minute)
+		return llm.Completion{Message: llm.Message{ToolCalls: []llm.ToolCall{call("echo", fmt.Sprintf(`{"text":"%s"}`, now))}}}, nil
+	}
+	answer := func(llm.Request) (llm.Completion, error) {
+		now = now.Add(2 * time.Minute)
+		return llm.Completion{Message: llm.Message{Content: `{"ok":true}`}}, nil
+	}
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){slowTurn, slowTurn, slowTurn, slowTurn, slowTurn, answer}}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 20, now: func() time.Time { return now }}
+	ctx, cancel := context.WithDeadline(context.Background(), base.Add(10*time.Minute))
+	defer cancel()
+
+	s, err := r.Run(ctx, "sys", "user", []tools.Tool{echo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Turns take 2 minutes: after the third, 4 minutes are left, short of
+	// another turn, the answer and the margin.
+	if s.Turns != 3 || !s.TurnLimitReached {
+		t.Fatalf("turns = %d, cut short = %v; want 3, true", s.Turns, s.TurnLimitReached)
+	}
+	fake.replies = fake.replies[len(fake.replies)-1:]
+	if err := s.Finish(ctx, "Answer.", llm.JSONSchema{Name: "a", Schema: json.RawMessage(`{"type":"object"}`)}, okValidator); err != nil {
+		t.Fatalf("the final answer still runs: %v", err)
+	}
+	if left := base.Add(10 * time.Minute).Sub(now); left < deadlineMargin {
+		t.Errorf("the answer ended %s before the deadline, want at least %s", left, deadlineMargin)
+	}
+}
+
+func TestRunWithTooLittleTimeAnswersRightAway(t *testing.T) {
+	fake := &script{}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 20}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s, err := r.Run(ctx, "sys", "user", []tools.Tool{echo})
+	if err != nil || s.Turns != 0 || !s.TurnLimitReached || len(fake.requests) != 0 {
+		t.Errorf("Run = %d turns, cut short = %v, %d requests, %v; want no turn", s.Turns, s.TurnLimitReached, len(fake.requests), err)
 	}
 }
 

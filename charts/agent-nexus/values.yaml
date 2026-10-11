@@ -64,6 +64,7 @@ eventsPerMinute: 30
 # Tool-calling turns per review.
 agentMaxTurns: 30
 # One job, end to end.
+# The investigation stops early enough to write the review within it.
 jobTimeout: 30m
 # How long agent transcripts are kept.
 transcriptRetention: 720h

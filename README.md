@@ -65,7 +65,7 @@ Everything is configured through environment variables.
 | `LLM_CONCURRENCY` | `1` | Parallel jobs; match llama-server `--parallel` |
 | `LLM_REQUEST_TIMEOUT` | `10m` | One completion, including time queued in llama-server |
 | `AGENT_MAX_TURNS` | `30` | Tool-loop turns per review |
-| `JOB_TIMEOUT` | `30m` | One job end to end |
+| `JOB_TIMEOUT` | `30m` | One job end to end; the investigation stops early enough to write the review before it |
 | `API_KEYS` | required for `serve` | `name=key,name=key`, each key ≥ 32 characters |
 | `ALLOWED_OWNERS` | required for `serve` | Comma-separated repository owners |
 | `EVENTS_PER_MINUTE` | `30` | Rate limit per API key |
