@@ -90,22 +90,29 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 		})
 	}
 	history := renderHistory(notes, login)
-	answered := 0
-	for _, a := range asks[:min(len(asks), maxAnswersPerJob)] {
+	batch := asks[:min(len(asks), maxAnswersPerJob)]
+	answered, answeredElsewhere := 0, 0
+	for _, a := range batch {
 		text, err := r.answer(ctx, f.Name(), repoID, pr, ws, a, login, history, record)
 		if err != nil {
 			return jobs.Result{}, err
 		}
-		posted, err := r.postAnswer(ctx, f, repoID, pr.Number, a, login, text, job.ID)
+		posted, err := r.postAnswer(ctx, f, repoID, pr, a, login, text, job.ID)
 		if err != nil {
 			return jobs.Result{}, err
 		}
 		if posted {
 			answered++
+		} else {
+			answeredElsewhere++
 		}
 	}
 	return jobs.Result{Status: jobs.Succeeded, Data: map[string]any{
-		"outcome": "answered", "answered": answered, "pending": len(asks) - answered,
+		"outcome":            "answered",
+		"answered":           answered,
+		"answered_elsewhere": answeredElsewhere,
+		// Left for the next pass, beyond this pass's batch.
+		"remaining": len(asks) - len(batch),
 	}}, nil
 }
 
@@ -149,7 +156,8 @@ func (r *Reviewer) answer(ctx context.Context, forgeName string, repoID forge.Re
 // postAnswer posts the reply in the thread, or as a pull request comment
 // for a mention, unless another job answered meanwhile. It reports
 // whether it posted.
-func (r *Reviewer) postAnswer(ctx context.Context, f forge.Forge, repoID forge.Repo, number int, a ask, login, text string, jobID int64) (bool, error) {
+func (r *Reviewer) postAnswer(ctx context.Context, f forge.Forge, repoID forge.Repo, pr forge.PR, a ask, login, text string, jobID int64) (bool, error) {
+	number := pr.Number
 	notes, err := f.ListNotes(ctx, repoID, number)
 	if err != nil {
 		return false, err
@@ -172,7 +180,12 @@ func (r *Reviewer) postAnswer(ctx context.Context, f forge.Forge, repoID forge.R
 		// (Gitea: write:issue). A comment-only review carries the
 		// answer instead.
 		r.logger().WarnContext(ctx, "cannot comment, answering with a review", "error", err)
-		return true, f.CreateReview(ctx, repoID, number, forge.NewReview{Event: forge.EventComment, Body: body})
+		// As for reviews: a failed submission may have left a pending
+		// review, which the next one would silently join.
+		if err := f.DeletePendingReviews(ctx, repoID, number); err != nil {
+			return false, err
+		}
+		return true, f.CreateReview(ctx, repoID, number, forge.NewReview{CommitSHA: pr.HeadSHA, Event: forge.EventComment, Body: body})
 	}
 	return err == nil, err
 }

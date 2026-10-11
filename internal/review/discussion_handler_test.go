@@ -84,7 +84,7 @@ func TestDiscussionAnswersRepliesAndMentions(t *testing.T) {
 	replyScript(f.llm, "Yes, line 5 returns 0.")
 
 	job := runDiscussion(t, f)
-	if job.Status != jobs.Succeeded || !strings.Contains(string(job.Result), `"answered":2`) {
+	if job.Status != jobs.Succeeded || !strings.Contains(string(job.Result), `"answered":2,"answered_elsewhere":0`) || !strings.Contains(string(job.Result), `"remaining":0`) {
 		t.Fatalf("job = %s %s %s", job.Status, job.Error, job.Result)
 	}
 	posted := f.forge.Replies()
@@ -127,6 +127,7 @@ func TestDiscussionAnswersRepliesAndMentions(t *testing.T) {
 func TestDiscussionFallsBackToReviewForComments(t *testing.T) {
 	f := discussionFixture(t)
 	f.forge.RejectComments = true
+	f.forge.AddReview(forge.Review{ID: 77, User: "agent-nexus", State: "PENDING"})
 	mention := f.forge.AddNote(forge.Note{Kind: forge.NoteComment, User: "bob", Body: "@agent-nexus ping"})
 	replyScript(f.llm, "Pong.")
 	job := runDiscussion(t, f)
@@ -134,8 +135,15 @@ func TestDiscussionFallsBackToReviewForComments(t *testing.T) {
 		t.Fatalf("job = %s %s", job.Status, job.Error)
 	}
 	created := f.forge.Created()
-	if len(created) != 1 || created[0].Event != forge.EventComment || !strings.Contains(created[0].Body, "Pong.") || !strings.Contains(created[0].Body, replyMarker(mention)) {
+	if len(created) != 1 || created[0].Event != forge.EventComment || created[0].CommitSHA != f.remote.HeadSHA ||
+		!strings.Contains(created[0].Body, "Pong.") || !strings.Contains(created[0].Body, replyMarker(mention)) {
 		t.Errorf("fallback review = %+v", created)
+	}
+	reviews, _ := f.forge.ListReviews(context.Background(), forge.Repo{}, 4)
+	for _, r := range reviews {
+		if r.State == "PENDING" {
+			t.Error("a pending review was left behind before the fallback review")
+		}
 	}
 	// The review counts as the answer.
 	if asks := pendingAsks(mustNotes(t, f), "agent-nexus"); len(asks) != 0 {
