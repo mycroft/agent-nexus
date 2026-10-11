@@ -47,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("POST /v1/events/pr-review", s.Keys.Middleware(http.HandlerFunc(s.prReviewEvent)))
 	mux.Handle("POST /v1/events/pr-comment", s.Keys.Middleware(http.HandlerFunc(s.prCommentEvent)))
+	mux.Handle("GET /v1/jobs", s.Keys.Middleware(http.HandlerFunc(s.listJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.Keys.Middleware(http.HandlerFunc(s.getJob)))
 	mux.Handle("GET /v1/jobs/{id}/steps", s.Keys.Middleware(http.HandlerFunc(s.getSteps)))
 	return mux
@@ -216,6 +217,39 @@ func (s *Server) forgeFor(serverURL string) forge.Forge {
 		}
 	}
 	return nil
+}
+
+// listJobs lists recent jobs, newest first, with their progress:
+// ?status=running,queued (comma-separated), ?kind=pr_review, ?limit=20.
+func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filter := jobs.ListFilter{Kind: q.Get("kind")}
+	for name := range strings.SplitSeq(q.Get("status"), ",") {
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		status, err := jobs.ParseStatus(name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		filter.Statuses = append(filter.Statuses, status)
+	}
+	if v := q.Get("limit"); v != "" {
+		limit, err := strconv.Atoi(v)
+		if err != nil || limit <= 0 {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		filter.Limit = limit
+	}
+	list, err := s.Queue.Store().List(r.Context(), filter)
+	if err != nil {
+		s.Logger.ErrorContext(r.Context(), "list jobs", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not list the jobs")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": list})
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {

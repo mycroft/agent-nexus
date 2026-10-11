@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/mycroft/agent-nexus/internal/agent"
@@ -26,6 +27,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
+	"github.com/mycroft/agent-nexus/internal/metrics"
 	"github.com/mycroft/agent-nexus/internal/review"
 	"github.com/mycroft/agent-nexus/internal/server"
 	"github.com/mycroft/agent-nexus/internal/skill"
@@ -181,6 +183,14 @@ func serve() error {
 		return err
 	}
 	defer store.Close()
+	prometheus.MustRegister(metrics.NewActiveJobsCollector(func(ctx context.Context) ([]metrics.ActiveJobs, error) {
+		stats, err := store.Active(ctx)
+		out := make([]metrics.ActiveJobs, 0, len(stats))
+		for _, s := range stats {
+			out = append(out, metrics.ActiveJobs{Status: string(s.Status), Count: s.Count, Oldest: s.Oldest})
+		}
+		return out, err
+	}))
 	queue := jobs.NewQueue(store, cfg.LLMConcurrency, cfg.JobTimeout, cfg.TranscriptRetention, log)
 	queue.Register(review.Kind, a.reviewer)
 	queue.Register(review.DiscussionKind, a.reviewer.DiscussionHandler())

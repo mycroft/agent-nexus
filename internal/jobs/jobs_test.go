@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -282,5 +283,117 @@ func TestKeepRunning(t *testing.T) {
 	}
 	if got, _ := s.Get(ctx, queued.ID); got.Status != Superseded {
 		t.Errorf("queued job = %s, want superseded", got.Status)
+	}
+}
+
+// seedJobs stores a running review with a transcript, a finished
+// discussion pass and a queued review, a minute apart.
+func seedJobs(t *testing.T) (*Store, time.Time, [3]int64) {
+	t.Helper()
+	ctx := context.Background()
+	s := openTestStore(t)
+	start := time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC)
+	now := start
+	s.now = func() time.Time { return now }
+
+	review, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "pr_review", GroupKey: "a", DedupeKey: "a@1", Payload: map[string]string{"repo": "o/a"}})
+	now = now.Add(time.Minute)
+	discussion, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "pr_discussion", GroupKey: "b", DedupeKey: "b@1", Payload: 1})
+	now = now.Add(time.Minute)
+	queued, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "pr_review", GroupKey: "c", DedupeKey: "c@1", Payload: 2})
+
+	if got, _ := s.Claim(ctx); got.ID != review.ID {
+		t.Fatalf("claimed %d", got.ID)
+	}
+	for _, st := range []Step{
+		{Role: "user", Content: "u"},
+		{Role: "assistant", Content: "a", PromptTokens: 100, CompletionTokens: 10},
+		{Role: "assistant", Content: "b", PromptTokens: 300, CompletionTokens: 20},
+	} {
+		if err := s.AddStep(ctx, review.ID, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := s.Claim(ctx); got.ID != discussion.ID {
+		t.Fatalf("claimed %d", got.ID)
+	}
+	if _, err := s.Finish(ctx, discussion.ID, Skipped, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	return s, start, [3]int64{review.ID, discussion.ID, queued.ID}
+}
+
+func TestList(t *testing.T) {
+	ctx := context.Background()
+	s, _, ids := seedJobs(t)
+	review, discussion, queued := ids[0], ids[1], ids[2]
+
+	all, err := s.List(ctx, ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 || all[0].ID != queued || all[2].ID != review {
+		t.Fatalf("list = %+v, want newest first", all)
+	}
+	p := all[2].Progress
+	if p.Turns != 2 || p.PeakPromptTokens != 300 || p.PromptTokens != 400 || p.CompletionTokens != 30 || p.LastActivity == nil {
+		t.Errorf("progress = %+v", p)
+	}
+	if all[0].Turns != 0 || all[0].LastActivity != nil {
+		t.Errorf("a queued job has no progress: %+v", all[0].Progress)
+	}
+
+	for _, tc := range []struct {
+		f    ListFilter
+		want []int64
+	}{
+		{ListFilter{Statuses: []Status{Running, Queued}}, []int64{queued, review}},
+		{ListFilter{Kind: "pr_discussion"}, []int64{discussion}},
+		{ListFilter{Kind: "pr_review", Statuses: []Status{Queued}}, []int64{queued}},
+		{ListFilter{Limit: 1}, []int64{queued}},
+		{ListFilter{Statuses: []Status{Failed}}, nil},
+	} {
+		got, err := s.List(ctx, tc.f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var listed []int64
+		for _, j := range got {
+			listed = append(listed, j.ID)
+		}
+		if fmt.Sprint(listed) != fmt.Sprint(tc.want) {
+			t.Errorf("List(%+v) = %v, want %v", tc.f, listed, tc.want)
+		}
+	}
+}
+
+func TestActive(t *testing.T) {
+	s, start, _ := seedJobs(t)
+	active, err := s.Active(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byStatus := map[Status]ActiveStat{}
+	for _, a := range active {
+		byStatus[a.Status] = a
+	}
+	if q := byStatus[Queued]; q.Count != 1 || !q.Oldest.Equal(start.Add(2*time.Minute)) {
+		t.Errorf("queued = %+v", q)
+	}
+	// A running job is dated from its start, not from when it was queued.
+	if r := byStatus[Running]; r.Count != 1 || !r.Oldest.Equal(start.Add(2*time.Minute)) {
+		t.Errorf("running = %+v", r)
+	}
+	if len(active) != 2 {
+		t.Errorf("active = %+v, want only queued and running", active)
+	}
+}
+
+func TestParseStatus(t *testing.T) {
+	if _, err := ParseStatus("running"); err != nil {
+		t.Error(err)
+	}
+	if _, err := ParseStatus("done"); err == nil {
+		t.Error("ParseStatus accepted an unknown status")
 	}
 }

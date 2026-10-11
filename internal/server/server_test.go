@@ -248,3 +248,45 @@ func TestPRCommentEvent(t *testing.T) {
 		t.Errorf("queued reviews = %d, want 1 (a comment must not supersede it)", reviews)
 	}
 }
+
+func TestListJobs(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	post(t, srv, apiKey, event(1, head))
+	postTo(t, srv, "/v1/events/pr-comment", apiKey, PREvent{ServerURL: "https://git.example.com", Repo: "mycroft/repo", PR: 1})
+
+	get := func(query, key string) (int, map[string]any) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/jobs"+query, nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	if code, _ := get("", "wrong"); code != http.StatusUnauthorized {
+		t.Errorf("no key → %d", code)
+	}
+	code, body := get("", apiKey)
+	list, _ := body["jobs"].([]any)
+	if code != http.StatusOK || len(list) != 2 {
+		t.Fatalf("list → %d %v", code, body)
+	}
+	newest, _ := list[0].(map[string]any)
+	if newest["kind"] != review.DiscussionKind || newest["status"] != "queued" || newest["turns"] != float64(0) || newest["payload"] == nil {
+		t.Errorf("newest job = %v", newest)
+	}
+	if code, body := get("?status=queued&kind=pr_review&limit=5", apiKey); code != http.StatusOK || len(body["jobs"].([]any)) != 1 {
+		t.Errorf("filtered → %d %v", code, body)
+	}
+	if code, body := get("?status=running", apiKey); code != http.StatusOK || len(body["jobs"].([]any)) != 0 {
+		t.Errorf("no running job → %d %v", code, body)
+	}
+	for _, bad := range []string{"?status=done", "?limit=0", "?limit=x"} {
+		if code, _ := get(bad, apiKey); code != http.StatusBadRequest {
+			t.Errorf("%s → %d", bad, code)
+		}
+	}
+}

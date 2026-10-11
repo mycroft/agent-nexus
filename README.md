@@ -177,11 +177,36 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
   - `202` with `{"job_id"}`. A newer event replaces a queued pass; a running
     pass finishes.
   - `200` when the PR is closed.
+- `GET /v1/jobs` lists recent jobs, newest first, with their payload
+  (forge, repository, PR) and their progress so far:
+  - progress fields: `turns`, `peak_prompt_tokens`, `prompt_tokens`,
+    `completion_tokens`, `last_activity`;
+  - filters: `?status=running,queued` (comma-separated), `?kind=pr_review`
+    or `pr_discussion`, `?limit=20` (at most 100).
 - `GET /v1/jobs/{id}` returns the job's status, result or error, and
   token usage.
 - `GET /v1/jobs/{id}/steps` returns the agent transcript: prompts, tool
   calls and answers.
 - `GET /healthz` needs no key.
+
+## Metrics
+
+These are served on `METRICS_ADDR` at `/metrics`:
+
+| Metric | |
+|---|---|
+| `agent_nexus_jobs{status}` | Unfinished jobs: `queued`, `running`, `posting` |
+| `agent_nexus_job_oldest_seconds{status}` | Age of the oldest unfinished job: since it was queued, or since it started |
+| `agent_nexus_jobs_total{kind,status}` | Finished jobs |
+| `agent_nexus_job_duration_seconds{kind}` | Job run time |
+| `agent_nexus_llm_request_duration_seconds{outcome}` | Chat-completion latency |
+| `agent_nexus_llm_tokens_total{type}` | Prompt and completion tokens |
+| `agent_nexus_tool_calls_total{tool,outcome}` | Tool calls: `ok`, `error`, `repeat`, `refused` |
+| `agent_nexus_forge_errors_total{forge}` | Failed forge API requests |
+
+For example, to alert on a stuck job, compare
+`agent_nexus_job_oldest_seconds{status="running"}` with `JOB_TIMEOUT`,
+which defaults to 30 minutes.
 
 ## Deployment
 
