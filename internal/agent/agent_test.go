@@ -186,6 +186,71 @@ func TestFinishFallsBackWhenTimeRunsOut(t *testing.T) {
 	}
 }
 
+// lastUserNote returns the request's trailing note, if its last message
+// is one.
+func lastUserNote(r llm.Request) string {
+	if last := r.Messages[len(r.Messages)-1]; last.Role == "user" && strings.HasPrefix(last.Content, "[You have") {
+		return last.Content
+	}
+	return ""
+}
+
+func TestRunTellsTurnsLeft(t *testing.T) {
+	turns := 0
+	// Distinct calls, so the repeat guard does not end the loop.
+	distinct := func(llm.Request) (llm.Completion, error) {
+		turns++
+		return llm.Completion{Message: llm.Message{ToolCalls: []llm.ToolCall{call("echo", fmt.Sprintf(`{"text":"%d"}`, turns))}}}, nil
+	}
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){distinct, distinct, distinct, distinct, distinct}}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 5}
+	s, err := r.Run(context.Background(), "sys", "user", []tools.Tool{echo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	for _, req := range fake.requests {
+		notes = append(notes, lastUserNote(req))
+	}
+	want := []string{"", "",
+		"[You have 3 turns left to investigate: confirm or drop your remaining concerns, then answer without calling a tool.]",
+		"[You have 2 turns left to investigate: confirm or drop your remaining concerns, then answer without calling a tool.]",
+		"[You have one turn left to investigate. Use it only if a finding depends on it; otherwise answer now, without calling a tool.]"}
+	if s.Turns != 5 || strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes before each turn =\n%s\nwant\n%s", strings.Join(notes, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestTurnsLeftFollowsTheDeadline(t *testing.T) {
+	base := time.Now()
+	now := base
+	n := 0
+	slowTurn := func(llm.Request) (llm.Completion, error) {
+		now = now.Add(2 * time.Minute)
+		n++
+		return llm.Completion{Message: llm.Message{ToolCalls: []llm.ToolCall{call("echo", fmt.Sprintf(`{"text":"%d"}`, n))}}}, nil
+	}
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){slowTurn, slowTurn, slowTurn, slowTurn, slowTurn, slowTurn}}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 20, now: func() time.Time { return now }}
+	ctx, cancel := context.WithDeadline(context.Background(), base.Add(12*time.Minute))
+	defer cancel()
+	s, err := r.Run(ctx, "sys", "user", []tools.Tool{echo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	for _, req := range fake.requests {
+		if note := lastUserNote(req); note != "" {
+			notes = append(notes, note[:16])
+		}
+	}
+	// 2-minute turns against 12 minutes: the count runs 3, 2, 1, and the
+	// turn announced as the last one is the last the loop allows.
+	if s.Turns != 4 || !s.TurnLimitReached || strings.Join(notes, ",") != "[You have 3 turn,[You have 2 turn,[You have one tu" {
+		t.Errorf("turns = %d, notes = %q", s.Turns, notes)
+	}
+}
+
 func TestRunWithTooLittleTimeAnswersRightAway(t *testing.T) {
 	fake := &script{}
 	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 20}

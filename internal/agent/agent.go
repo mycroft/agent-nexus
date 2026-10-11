@@ -37,6 +37,10 @@ const (
 	minTurnEstimate = time.Minute
 	// deadlineMargin is left after the final answer, to post it.
 	deadlineMargin = 30 * time.Second
+	// wrapUpTurns is how many turns before the end of the investigation
+	// the model starts being told how many it has left, so it concludes
+	// rather than being cut short.
+	wrapUpTurns = 3
 )
 
 // Completer is the subset of *llm.Client the loop needs.
@@ -151,6 +155,9 @@ func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.T
 			r.logger().WarnContext(ctx, "the model keeps repeating its tool calls; ending the investigation", "turns", s.Turns)
 			break
 		}
+		if note := turnsLeftNote(s.turnsLeft(ctx)); note != "" {
+			s.say(note)
+		}
 	}
 	s.TurnLimitReached = true
 	return s, nil
@@ -166,6 +173,31 @@ func (s *Session) nearDeadline(ctx context.Context, calls int) bool {
 	}
 	turn := max(s.longestTurn, minTurnEstimate)
 	return deadline.Sub(s.r.clock()) < time.Duration(calls)*turn+deadlineMargin
+}
+
+// turnsLeft estimates how many more turns the investigation may take: what
+// the turn limit allows, and what fits before the context's deadline as
+// nearDeadline counts it.
+func (s *Session) turnsLeft(ctx context.Context) int {
+	left := s.r.MaxTurns - s.Turns
+	if deadline, ok := ctx.Deadline(); ok {
+		turn := max(s.longestTurn, minTurnEstimate)
+		left = min(left, int((deadline.Sub(s.r.clock())-deadlineMargin)/turn)-1)
+	}
+	return left
+}
+
+// turnsLeftNote tells the model, near the end of the investigation, how
+// many turns it has left.
+func turnsLeftNote(left int) string {
+	switch {
+	case left <= 0 || left > wrapUpTurns:
+		return ""
+	case left == 1:
+		return "[You have one turn left to investigate. Use it only if a finding depends on it; otherwise answer now, without calling a tool.]"
+	default:
+		return fmt.Sprintf("[You have %d turns left to investigate: confirm or drop your remaining concerns, then answer without calling a tool.]", left)
+	}
 }
 
 // Finish asks for the final answer, a JSON document matching schema, and
