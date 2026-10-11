@@ -8,6 +8,7 @@ This file guides Claude Code when working in this repository.
 - `make lint` runs golangci-lint v2 with the strict `.golangci.yaml`, and `make vet` runs `go vet`. Run `golangci-lint fmt -c .golangci.yaml ./...` to fix imports.
 - `go run ./cmd/agent-nexus review -forge gitea -repo o/r -pr N -dry-run -transcript` runs one real review without posting it. It needs the LLM and forge env vars listed in README.md.
 - `CONTAINER_TOOL=podman make docker-build`. The local docker has no buildx.
+- `make css` builds the UI stylesheet with the Tailwind standalone CLI (downloaded to `bin/`); the output is gitignored, and `make build`, `make run` and the Dockerfile build it. Tests do not need it.
 - `make helm-lint` lints `charts/agent-nexus` with each `ci/*-values.yaml`. The chart `fail`s on missing required values, so linting it with the defaults is expected to fail.
 - A `vX.Y.Z` tag releases the image (`build-image.yaml`) and the OCI chart (`release-chart.yaml`), both at version `X.Y.Z`.
 
@@ -31,6 +32,7 @@ The flow is event → job → handler → agent → forge.
 - **`internal/gitrepo`:** a bare-repo cache plus a hardened git CLI wrapper. Nothing is ever checked out.
 - **`internal/tools`:** read-only tools over git objects.
 - **`internal/forge`:** Gitea (bot token) and GitHub (App JWT → installation token), as hand-rolled REST clients. `forgetest.Fake` is an in-memory forge for tests.
+- **`internal/web`:** the read-only jobs UI on `UI_ADDR` (htmx + Tailwind v4, templates and assets embedded). The main page polls `/fragments/live`, which sets `HX-Trigger: jobs-changed` when the running and queued jobs differ from `?seen=`, and the history reloads on that event. A job page polls `/fragments/jobs/{id}/steps?after=<seq>` while the job is unfinished. Tailwind scans `templates/` and `*.go`, so class names in Go maps (`funcs.go`) must be complete literals.
 - **`skills/`:** Agent Skills (`<name>/SKILL.md`, frontmatter `name` and `description` only), embedded via `skills/embed.go`.
 
 ## Invariants
@@ -40,6 +42,7 @@ The flow is event → job → handler → agent → forge.
 - **Repository guidance comes from the base commit,** never the PR head.
 - **A review marker names the commit, or for a forced review also the job** (`reviewMarker`). A forced review (a review request, or an `@agent-nexus review` comment, which `requestReview` handles without the LLM) is therefore never mistaken for the commit's earlier review, and is still posted only once.
 - **Never trust the triggering comment.** A discussion pass rescans the whole discussion. The bot's own notes never count as asks, which prevents loops, and every answer carries `<!-- agent-nexus:reply-to=<kind>:<id> -->` markers.
+- **The UI has no authentication.** It only reads the store and runs on its own listener, so the deployment puts it behind an authenticating proxy while the API ingress stays reachable with API keys. Keep it read-only, and keep the CSP (`default-src 'self'`, htmx with `allowEval: false`): no inline scripts or styles.
 - **Reviews are `COMMENT` unless the repository resolves to verdict mode.** See `resolveMode` in `internal/review/mode.go`: an exact central rule, then `.agent-nexus.yaml` on the base commit, then central patterns, then comment. `verdictEvent` downgrades a verdict that contradicts the findings, and `postAttempts` falls back to a comment if the forge refuses the verdict.
 
 ## Style

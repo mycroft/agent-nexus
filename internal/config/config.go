@@ -17,6 +17,9 @@ type Config struct {
 	// MetricsAddr serves /metrics. It is kept off the public listener so the
 	// Ingress never exposes it.
 	MetricsAddr string
+	// UIAddr serves the jobs UI, which has no authentication of its own:
+	// expose it only behind an authenticating proxy.
+	UIAddr string
 	// LogLevel is one of "debug", "info", "warn", "error".
 	LogLevel string
 
@@ -74,6 +77,7 @@ func Load() (Config, error) {
 	c := Config{
 		ListenAddr:          getEnv("LISTEN_ADDR", ":8080"),
 		MetricsAddr:         getEnv("METRICS_ADDR", ":9090"),
+		UIAddr:              getEnv("UI_ADDR", ":8081"),
 		LogLevel:            getEnv("LOG_LEVEL", "info"),
 		DBPath:              getEnv("DB_PATH", "agent-nexus.db"),
 		RepoCacheDir:        getEnv("REPO_CACHE_DIR", "repos"),

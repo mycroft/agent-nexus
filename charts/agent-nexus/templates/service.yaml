@@ -15,5 +15,9 @@ spec:
       targetPort: metrics
       protocol: TCP
       name: metrics
+    - port: {{ .Values.service.uiPort }}
+      targetPort: ui
+      protocol: TCP
+      name: ui
   selector:
     {{- include "agent-nexus.selectorLabels" . | nindent 4 }}

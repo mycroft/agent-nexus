@@ -75,6 +75,7 @@ Everything is configured through environment variables.
 | `GITHUB_API_URL`, `GITHUB_SERVER_URL` | github.com | For GitHub Enterprise |
 | `LISTEN_ADDR` | `:8080` | API |
 | `METRICS_ADDR` | `:9090` | `/metrics`; keep it out of the Ingress |
+| `UI_ADDR` | `:8081` | Jobs UI, unauthenticated: expose it only behind an authenticating proxy |
 | `DB_PATH` | `agent-nexus.db` | SQLite database |
 | `REPO_CACHE_DIR` | `repos` | Bare repository cache |
 | `TRANSCRIPT_RETENTION` | `720h` | How long agent transcripts are kept |
@@ -206,6 +207,24 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
   calls and answers.
 - `GET /healthz` needs no key.
 
+## Jobs UI
+
+`UI_ADDR` serves a read-only web UI over the job store:
+
+- the main page shows the running job (turns, peak context, last activity),
+  the queued ones, and the job history;
+- a job page shows its outcome and every step of the agent transcript:
+  prompts, reasoning, tool calls and tool output.
+
+Both pages refresh themselves with htmx while jobs run. The theme follows
+the OS until toggled.
+
+The UI has no authentication of its own, which is why it has its own
+listener: route it through an authenticating proxy (an Authentik outpost,
+for instance), on its own host, and keep the API's ingress pointing at
+`LISTEN_ADDR` only. The API keeps authenticating with its API keys, so CI
+runners reach it without going through the proxy.
+
 ## Metrics
 
 These are served on `METRICS_ADDR` at `/metrics`:
@@ -247,6 +266,10 @@ keys:
 
 Everything else lives in [`values.yaml`](charts/agent-nexus/values.yaml).
 The chart fails to render when a required setting is missing.
+
+The Service has three ports: `http` (the API, which the chart's ingress
+routes), `metrics`, and `ui`. The chart never exposes `ui`; give it its own
+ingress behind an authenticating proxy (see [Jobs UI](#jobs-ui)).
 
 Pushing a `vX.Y.Z` tag releases both artifacts:
 
@@ -328,9 +351,13 @@ jobs:
 ```sh
 make test   # go test -race ./...
 make lint   # golangci-lint
-make build
+make build  # also builds the UI stylesheet
+make css-watch
 make helm-lint
 CONTAINER_TOOL=podman make docker-build
 ```
 
-Tests need `git` on the PATH.
+Tests need `git` on the PATH. `make css` downloads the Tailwind standalone
+CLI into `bin/` and writes `internal/web/static/css/app.css`, which is not
+committed. htmx is vendored in `internal/web/static/js` (`make vendor-js`
+updates it).

@@ -35,6 +35,8 @@ type JobSummary struct {
 type ListFilter struct {
 	Statuses []Status
 	Kind     string
+	// BeforeID lists jobs older than this one, to page through history.
+	BeforeID int64
 	Limit    int
 }
 
@@ -57,6 +59,10 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]JobSummary, error) {
 	if f.Kind != "" {
 		where = append(where, "kind = ?")
 		args = append(args, f.Kind)
+	}
+	if f.BeforeID > 0 {
+		where = append(where, "id < ?")
+		args = append(args, f.BeforeID)
 	}
 	query := `SELECT ` + jobColumns + ` FROM jobs`
 	if len(where) > 0 {
@@ -96,6 +102,19 @@ func (s *Store) queryJobs(ctx context.Context, query string, args ...any) ([]Job
 		return nil, nil, fmt.Errorf("list jobs: %w", err)
 	}
 	return out, index, nil
+}
+
+// Summary returns one job with its progress.
+func (s *Store) Summary(ctx context.Context, id int64) (JobSummary, error) {
+	job, err := s.Get(ctx, id)
+	if err != nil {
+		return JobSummary{}, err
+	}
+	out := []JobSummary{{Job: job}}
+	if err := s.addProgress(ctx, out, map[int64]int{id: 0}); err != nil {
+		return JobSummary{}, err
+	}
+	return out[0], nil
 }
 
 // addProgress fills in the progress of the listed jobs from their steps.

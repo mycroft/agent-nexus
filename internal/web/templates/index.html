@@ -1,0 +1,121 @@
+{{define "index" -}}
+{{template "top" .}}
+<main class="mx-auto max-w-6xl space-y-8 px-4 py-6 sm:px-6">
+  {{template "live" .Live}}
+  {{template "history" .History}}
+</main>
+{{template "bottom" .}}
+{{- end}}
+
+{{/* The running and queued jobs, polled every few seconds. */}}
+{{define "live" -}}
+<section id="live" hx-get="/fragments/live?seen={{.Seen}}" hx-trigger="every 5s" hx-swap="outerHTML" class="space-y-3" aria-live="polite">
+  {{- range .Active}}
+  <a href="/jobs/{{.ID}}" class="block rounded-xl border border-amber-200 bg-amber-50/70 p-4 shadow-xs transition hover:border-amber-300 hover:bg-amber-50 dark:border-amber-500/25 dark:bg-amber-500/5 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10">
+    <div class="flex flex-wrap items-center gap-3">
+      <span class="relative flex size-2.5" aria-hidden="true">
+        <span class="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-75"></span>
+        <span class="relative inline-flex size-2.5 rounded-full bg-amber-500"></span>
+      </span>
+      <span class="font-medium">{{kindLabel .Kind}} of {{.Repo}}#{{.PR}}</span>
+      {{- if .Forced}}<span class="rounded bg-violet-100 px-1.5 py-0.5 text-xs text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">requested</span>{{end}}
+      {{template "status-pill" .Status}}
+      <span class="ml-auto text-sm tabular-nums text-amber-800 dark:text-amber-300">{{if .StartedAt}}running for {{duration .StartedAt nil}}{{end}}</span>
+    </div>
+    <dl class="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
+      <div><dt class="inline">job</dt> <dd class="inline font-mono">#{{.ID}}</dd></div>
+      <div><dt class="inline">turns</dt> <dd class="inline tabular-nums">{{.Progress.Turns}}</dd></div>
+      <div><dt class="inline">peak context</dt> <dd class="inline tabular-nums">{{tokens .Progress.PeakPromptTokens}}</dd></div>
+      {{- with .Progress.LastActivity}}
+      <div><dt class="inline">last activity</dt> <dd class="inline">{{ago .}} ago</dd></div>
+      {{- end}}
+      {{- with .HeadSHA}}
+      <div><dt class="inline">commit</dt> <dd class="inline font-mono">{{short .}}</dd></div>
+      {{- end}}
+    </dl>
+  </a>
+  {{- else}}
+  <div class="flex items-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-3 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
+    <span class="size-2 rounded-full bg-emerald-500" aria-hidden="true"></span>No job running
+  </div>
+  {{- end}}
+  {{- with .Queued}}
+  <div class="flex flex-wrap items-center gap-2 text-sm">
+    <span class="text-slate-500 dark:text-slate-400">Queued</span>
+    {{- range .}}
+    <a href="/jobs/{{.ID}}" class="rounded-lg border border-slate-200 bg-white px-2 py-0.5 text-xs hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700">
+      <span class="font-mono text-slate-400">#{{.ID}}</span> {{kindLabel .Kind}} {{.Repo}}#{{.PR}}
+    </a>
+    {{- end}}
+  </div>
+  {{- end}}
+</section>
+{{- end}}
+
+{{/* The history, reloaded when the running and queued jobs change. */}}
+{{define "history" -}}
+<section id="history" hx-get="/fragments/history" hx-trigger="jobs-changed from:body" hx-swap="outerHTML" class="space-y-3">
+  <h2 class="text-sm font-semibold text-slate-700 dark:text-slate-300">History</h2>
+  {{- if .Jobs}}
+  <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
+    <table class="min-w-full text-sm">
+      <thead class="border-b border-slate-200 bg-slate-50/80 text-left text-xs font-medium text-slate-500 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
+        <tr>
+          <th class="px-4 py-2">Job</th>
+          <th class="hidden px-4 py-2 sm:table-cell">Pull request</th>
+          <th class="px-4 py-2">Status</th>
+          <th class="hidden px-4 py-2 lg:table-cell">Outcome</th>
+          <th class="hidden px-4 py-2 text-right xl:table-cell">Turns</th>
+          <th class="hidden px-4 py-2 text-right xl:table-cell">Peak context</th>
+          <th class="hidden px-4 py-2 text-right sm:table-cell">Duration</th>
+          <th class="hidden px-4 py-2 text-right sm:table-cell">Created</th>
+        </tr>
+      </thead>
+      <tbody id="history-rows" class="divide-y divide-slate-100 dark:divide-slate-800">
+        {{- template "rows" .Jobs}}
+      </tbody>
+    </table>
+  </div>
+  {{template "load-more" .}}
+  {{- else}}
+  <p class="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">No jobs yet.</p>
+  {{- end}}
+</section>
+{{- end}}
+
+{{/* Older rows, appended to the table; the button follows out of band. */}}
+{{define "history-rows" -}}
+{{template "rows" .Jobs}}
+{{template "load-more" .}}
+{{- end}}
+
+{{define "load-more" -}}
+<div id="load-more"{{if .OOB}} hx-swap-oob="true"{{end}} class="flex justify-center">
+  {{- if .OlderID}}
+  <button type="button" hx-get="/fragments/history?before={{.OlderID}}" hx-target="#history-rows" hx-swap="beforeend"
+          class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-xs hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800">
+    Load older jobs
+  </button>
+  {{- end}}
+</div>
+{{- end}}
+
+{{define "rows" -}}
+{{- range .}}
+<tr data-href="/jobs/{{.ID}}" class="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50">
+  <td class="whitespace-nowrap px-4 py-2">
+    <a href="/jobs/{{.ID}}" class="font-mono text-slate-400 hover:text-violet-600 dark:hover:text-violet-400">#{{.ID}}</a>
+    <span class="ml-1.5 font-medium">{{kindLabel .Kind}}</span>
+    {{- if .Forced}} <span class="rounded bg-violet-100 px-1 py-px text-[10px] text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">requested</span>{{end}}
+    {{- if .Repo}}<div class="text-xs text-slate-500 sm:hidden dark:text-slate-400">{{.Repo}}#{{.PR}}</div>{{end}}
+  </td>
+  <td class="hidden whitespace-nowrap px-4 py-2 sm:table-cell">{{if .Repo}}{{.Repo}}<span class="text-slate-400">#{{.PR}}</span>{{end}}</td>
+  <td class="whitespace-nowrap px-4 py-2">{{template "status-pill" .Status}}</td>
+  <td class="hidden max-w-56 truncate px-4 py-2 text-slate-600 lg:table-cell dark:text-slate-400" title="{{.Error}}">{{.Outcome}}</td>
+  <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums xl:table-cell">{{with .Progress.Turns}}{{.}}{{end}}</td>
+  <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums xl:table-cell">{{with .Progress.PeakPromptTokens}}{{tokens .}}{{end}}</td>
+  <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums sm:table-cell">{{duration .StartedAt .FinishedAt}}</td>
+  <td class="hidden whitespace-nowrap px-4 py-2 text-right text-slate-500 sm:table-cell dark:text-slate-400" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}} ago</td>
+</tr>
+{{- end}}
+{{- end}}

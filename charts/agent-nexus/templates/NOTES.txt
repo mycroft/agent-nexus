@@ -16,3 +16,6 @@ with "Authorization: Bearer <key>", a key from the api-keys entry of the
 
 Inspect a job and its agent transcript:
   GET /v1/jobs/<id> and /v1/jobs/<id>/steps (same key)
+
+The jobs UI, which has no authentication of its own, is on the ui port:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agent-nexus.fullname" . }} {{ .Values.service.uiPort }}:ui

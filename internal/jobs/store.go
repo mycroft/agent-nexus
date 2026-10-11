@@ -75,6 +75,8 @@ type NewJob struct {
 
 // Step is one transcript entry of a job.
 type Step struct {
+	// Seq numbers the steps of a job from 1; AddStep assigns it.
+	Seq              int       `json:"seq"`
 	Role             string    `json:"role"`
 	ToolName         string    `json:"tool_name,omitempty"`
 	Content          string    `json:"content"`
@@ -338,8 +340,14 @@ func (s *Store) Usage(ctx context.Context, id int64) (int, int, error) {
 
 // Steps returns a job's transcript in order.
 func (s *Store) Steps(ctx context.Context, id int64) ([]Step, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT role, tool_name, content, prompt_tokens, completion_tokens, created_at
-		FROM job_steps WHERE job_id = ? ORDER BY seq`, id)
+	return s.StepsAfter(ctx, id, 0)
+}
+
+// StepsAfter returns the steps of a job numbered after seq, in order: the
+// ones recorded since a reader last looked.
+func (s *Store) StepsAfter(ctx context.Context, id int64, seq int) ([]Step, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT seq, role, tool_name, content, prompt_tokens, completion_tokens, created_at
+		FROM job_steps WHERE job_id = ? AND seq > ? ORDER BY seq`, id, seq)
 	if err != nil {
 		return nil, fmt.Errorf("list steps of job %d: %w", id, err)
 	}
@@ -348,7 +356,7 @@ func (s *Store) Steps(ctx context.Context, id int64) ([]Step, error) {
 	for rows.Next() {
 		var st Step
 		var created string
-		if err := rows.Scan(&st.Role, &st.ToolName, &st.Content, &st.PromptTokens, &st.CompletionTokens, &created); err != nil {
+		if err := rows.Scan(&st.Seq, &st.Role, &st.ToolName, &st.Content, &st.PromptTokens, &st.CompletionTokens, &created); err != nil {
 			return nil, fmt.Errorf("scan step: %w", err)
 		}
 		st.CreatedAt = parseTime(created)

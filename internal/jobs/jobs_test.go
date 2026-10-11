@@ -138,8 +138,15 @@ func TestStepsAndPrune(t *testing.T) {
 		}
 	}
 	steps, err := s.Steps(ctx, j.ID)
-	if err != nil || len(steps) != 2 || steps[1].Content != "a" {
+	if err != nil || len(steps) != 2 || steps[1].Content != "a" || steps[0].Seq != 1 || steps[1].Seq != 2 {
 		t.Fatalf("Steps = %+v, %v", steps, err)
+	}
+	after, err := s.StepsAfter(ctx, j.ID, 1)
+	if err != nil || len(after) != 1 || after[0].Seq != 2 {
+		t.Errorf("StepsAfter(1) = %+v, %v", after, err)
+	}
+	if after, err := s.StepsAfter(ctx, j.ID, 2); err != nil || len(after) != 0 {
+		t.Errorf("StepsAfter(2) = %+v, %v, want none", after, err)
 	}
 	p, c, err := s.Usage(ctx, j.ID)
 	if err != nil || p != 7 || c != 3 {
@@ -351,6 +358,9 @@ func TestList(t *testing.T) {
 		{ListFilter{Kind: "pr_discussion"}, []int64{discussion}},
 		{ListFilter{Kind: "pr_review", Statuses: []Status{Queued}}, []int64{queued}},
 		{ListFilter{Limit: 1}, []int64{queued}},
+		{ListFilter{BeforeID: queued}, []int64{discussion, review}},
+		{ListFilter{BeforeID: discussion, Limit: 1}, []int64{review}},
+		{ListFilter{BeforeID: review}, nil},
 		{ListFilter{Statuses: []Status{Failed}}, nil},
 	} {
 		got, err := s.List(ctx, tc.f)
@@ -364,6 +374,24 @@ func TestList(t *testing.T) {
 		if fmt.Sprint(listed) != fmt.Sprint(tc.want) {
 			t.Errorf("List(%+v) = %v, want %v", tc.f, listed, tc.want)
 		}
+	}
+}
+
+func TestSummary(t *testing.T) {
+	ctx := context.Background()
+	s, _, ids := seedJobs(t)
+	got, err := s.Summary(ctx, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != ids[0] || got.Status != Running || got.Turns != 2 || got.PeakPromptTokens != 300 {
+		t.Errorf("Summary = %+v", got)
+	}
+	if got, err := s.Summary(ctx, ids[2]); err != nil || got.Turns != 0 || got.LastActivity != nil {
+		t.Errorf("Summary of a queued job = %+v, %v", got, err)
+	}
+	if _, err := s.Summary(ctx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Summary(999) error = %v, want ErrNotFound", err)
 	}
 }
 

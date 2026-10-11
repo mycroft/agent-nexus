@@ -104,6 +104,10 @@ service:
   port: 8080
   # Serves /metrics. The ingress only routes the http port.
   metricsPort: 9090
+  # Serves the jobs UI. It has no authentication of its own: route it only
+  # through an authenticating proxy (e.g. an Authentik outpost), never
+  # through the ingress below.
+  uiPort: 8081
 
 # The event API authenticates callers with the API keys; it can be exposed.
 ingress:

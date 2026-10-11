@@ -31,6 +31,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/review"
 	"github.com/mycroft/agent-nexus/internal/server"
 	"github.com/mycroft/agent-nexus/internal/skill"
+	"github.com/mycroft/agent-nexus/internal/web"
 	"github.com/mycroft/agent-nexus/skills"
 )
 
@@ -209,10 +210,28 @@ func serve() error {
 	metricsMux.Handle("GET /metrics", promhttp.Handler())
 	metricsServer := &http.Server{Addr: cfg.MetricsAddr, Handler: metricsMux, ReadHeaderTimeout: 10 * time.Second}
 
-	errs := make(chan error, 3)
+	forgeURLs := map[string]string{}
+	for _, f := range a.forges {
+		forgeURLs[f.Name()] = f.ServerURL()
+	}
+	ui, err := web.New(store, web.Options{Version: version, ForgeURLs: forgeURLs, Logger: log})
+	if err != nil {
+		return err
+	}
+	uiServer := &http.Server{
+		Addr:              cfg.UIAddr,
+		Handler:           ui.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	servers := []*http.Server{apiServer, metricsServer, uiServer}
+
+	errs := make(chan error, 1+len(servers))
 	var wg sync.WaitGroup
 	wg.Go(func() { errs <- queue.Run(ctx) })
-	for _, srv := range []*http.Server{apiServer, metricsServer} {
+	for _, srv := range servers {
 		wg.Go(func() {
 			log.Info("listening", "addr", srv.Addr)
 			if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
@@ -230,7 +249,7 @@ func serve() error {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, srv := range []*http.Server{apiServer, metricsServer} {
+	for _, srv := range servers {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Warn("http shutdown", "addr", srv.Addr, "error", err)
 		}

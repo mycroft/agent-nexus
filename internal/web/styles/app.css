@@ -1,0 +1,39 @@
+@import "tailwindcss" source(none);
+
+/* Class names live in the templates and in Go (status → color mappings). */
+@source "../templates";
+@source "../*.go";
+
+/*
+ * Dark mode follows the OS until the user picks a theme with the header
+ * toggle, which the server renders as <html data-theme="light|dark">.
+ */
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme]), :root:not([data-theme]) *) {
+      @slot;
+    }
+  }
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
+  summary {
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+}

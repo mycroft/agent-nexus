@@ -1,0 +1,54 @@
+{{define "top" -}}
+<!doctype html>
+<html lang="en" class="h-full"{{with .Theme}} data-theme="{{.}}"{{end}}>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"historyCacheSize":0,"refreshOnHistoryMiss":true,"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+  <title>{{.Title}} · agent-nexus</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{.Version}}">
+  <link rel="stylesheet" href="/static/css/app.css?v={{.Version}}">
+  <script defer src="/static/js/htmx.min.js?v={{.Version}}"></script>
+  <script defer src="/static/js/app.js?v={{.Version}}"></script>
+</head>
+<body class="min-h-full bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100">
+  <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/85 backdrop-blur dark:border-slate-800 dark:bg-slate-950/85">
+    <div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3 sm:px-6">
+      <a href="/" class="flex items-center gap-2 font-semibold tracking-tight">
+        <svg viewBox="0 0 24 24" class="size-6 text-violet-600 dark:text-violet-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="6" r="1.75"/><circle cx="19.5" cy="6" r="1.75"/><circle cx="12" cy="20.5" r="1.75"/>
+          <path d="M6 7l3.6 3M18 7l-3.6 3M12 15v3.75"/>
+        </svg>
+        <span>agent-nexus</span>
+      </a>
+      <span class="ml-auto font-mono text-xs text-slate-400 dark:text-slate-500" title="agent-nexus version">{{displayVersion .Version}}</span>
+      <button type="button" data-theme-toggle class="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              title="Toggle light/dark theme" aria-label="Toggle light/dark theme">
+        <svg viewBox="0 0 20 20" fill="currentColor" class="size-4 dark:hidden" aria-hidden="true"><path fill-rule="evenodd" d="M7.46 1.9a.75.75 0 0 1 .17.82 6.5 6.5 0 0 0 8.65 8.65.75.75 0 0 1 .99.99A8 8 0 1 1 6.64 1.73a.75.75 0 0 1 .82.17Z" clip-rule="evenodd"/></svg>
+        <svg viewBox="0 0 20 20" fill="currentColor" class="hidden size-4 dark:block" aria-hidden="true"><path d="M10 2a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 2ZM10 15a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 15ZM10 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM15.66 5.4a.75.75 0 0 0-1.06-1.06l-1.06 1.06a.75.75 0 0 0 1.06 1.06l1.06-1.06ZM6.46 14.6a.75.75 0 1 0-1.06-1.06l-1.06 1.06a.75.75 0 0 0 1.06 1.06l1.06-1.06ZM18 10a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 18 10ZM5 10a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 5 10ZM14.6 15.66a.75.75 0 0 0 1.06-1.06l-1.06-1.06a.75.75 0 1 0-1.06 1.06l1.06 1.06ZM5.4 6.46a.75.75 0 0 0 1.06-1.06L5.4 4.34a.75.75 0 0 0-1.06 1.06L5.4 6.46Z"/></svg>
+      </button>
+    </div>
+  </header>
+{{- end}}
+
+{{define "bottom" -}}
+</body>
+</html>
+{{- end}}
+
+{{define "status-pill" -}}
+<span class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset {{statusClass .}}">
+  <span class="size-1.5 rounded-full {{dotClass .}}{{if eq . "running"}} animate-pulse{{end}}"></span>{{.}}
+</span>
+{{- end}}
+
+{{define "not-found" -}}
+{{template "top" .}}
+<main class="mx-auto max-w-6xl px-4 py-16 text-center sm:px-6">
+  <p class="text-sm font-semibold text-violet-600 dark:text-violet-400">404</p>
+  <h1 class="mt-2 text-xl font-semibold">No such job</h1>
+  <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Its transcript may have been pruned, or the job never existed.</p>
+  <a href="/" class="mt-6 inline-block text-sm font-medium text-violet-600 hover:underline dark:text-violet-400">← Back to the jobs</a>
+</main>
+{{template "bottom" .}}
+{{- end}}
