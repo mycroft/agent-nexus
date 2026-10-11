@@ -79,7 +79,7 @@ Everything is configured through environment variables.
 | `DB_PATH` | `agent-nexus.db` | SQLite database |
 | `REPO_CACHE_DIR` | `repos` | Bare repository cache |
 | `CHART_CACHE_DIR` | `charts` | Helm chart packages and indexes read by the agent |
-| `FETCH_ALLOWED_HOSTS` | | Comma-separated hosts the agent may read charts from besides those the reviewed repository references |
+| `FETCH_ALLOWED_HOSTS` | | Comma-separated hosts the agent may read from (chart repositories, pages, image registries) besides those the reviewed repository references |
 | `TRANSCRIPT_RETENTION` | `720h` | How long agent transcripts are kept |
 | `SKILLS_DIR` | embedded | Load skills from disk instead |
 | `LOG_LEVEL` | `info` | |
@@ -140,7 +140,9 @@ On Gitea, an approval counts toward branch protection only when the
 reviewer has write access or is in the approvals allowlist. A read-only
 bot's approvals are shown but are not "official".
 
-## Helm charts
+## Reading charts, release notes and docs
+
+### Helm charts
 
 Most version-bump PRs change one line, such as
 `prometheus-community/kube-prometheus-stack: 92.3.0`. The agent can read
@@ -159,18 +161,43 @@ with the package digest checked) and OCI registries (`oci://…`, with an
 anonymous registry token). Subcharts shipped as archives are unpacked
 under `charts/<name>/`.
 
-The model chooses the repository URL, so a URL is accepted only if:
+The model chooses the repository URL, so a chart URL is accepted only if:
 
 - **it appears in the reviewed repository's base branch**, which a pull
   request cannot change. The model can only name repositories already in
   use, and cannot carry data out in a URL;
 - **or its host is in `FETCH_ALLOWED_HOSTS`**.
 
+### Release notes and pages
+
+- **`release_notes(image, from_version, to_version)`** reads the GitHub
+  releases of a container image's project, after `from` up to `to`.
+  - It finds the project from the image's
+    `org.opencontainers.image.source` label, or from its name for ghcr.io.
+  - Versions compare by their numbers, so image tag `v2.5` matches release
+    `v2.5.0`.
+  - Pre-releases count only when `to` is one.
+  - It uses the GitHub API anonymously (60 requests an hour).
+- **`fetch_url(url)`** reads a page as text: HTML is converted, markdown and
+  plain text are kept. GitHub file links are read from their raw content.
+  Pages are cached for 15 minutes, so reading one in parts fetches it once.
+
+What the model may ask for is limited the same way:
+- **Images:** the image name must appear in the base branch, matched as a
+  whole name: `haals/yopass` doesn't ride on `jhaals/yopass`. Otherwise,
+  its registry must be on `FETCH_ALLOWED_HOSTS`.
+- **Pages:** the page's host must appear in the base branch, matched as a
+  whole hostname: `community.github.io` doesn't ride on
+  `prometheus-community.github.io`. Otherwise, it must be on
+  `FETCH_ALLOWED_HOSTS`. Query strings are refused.
+
+### Network safety
+
 Every connection, redirects included, must reach a public address, so
 neither a URL nor a redirect can reach the cluster, the local network or
 the host. No credentials are sent, and proxy settings are ignored.
 
-Packages are cached under `CHART_CACHE_DIR` for good, since a published
+Chart packages are cached under `CHART_CACHE_DIR` for good, since a published
 version doesn't change; indexes are refreshed hourly. Sizes are capped:
 32 MB per index, 16 MB per package, and 64 MB or 5000 files once
 unpacked. Packages are read in memory, never unpacked to disk.

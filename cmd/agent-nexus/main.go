@@ -29,6 +29,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
 	"github.com/mycroft/agent-nexus/internal/metrics"
+	"github.com/mycroft/agent-nexus/internal/remote"
 	"github.com/mycroft/agent-nexus/internal/review"
 	"github.com/mycroft/agent-nexus/internal/server"
 	"github.com/mycroft/agent-nexus/internal/skill"
@@ -140,7 +141,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err != nil {
 		return nil, err
 	}
-	chartFetcher, err := charts.New(cfg.ChartCacheDir, nil)
+	remoteClient := remote.New(nil)
+	chartFetcher, err := charts.New(cfg.ChartCacheDir, remoteClient)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +157,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		MaxTurns:        cfg.AgentMaxTurns,
 		ModeRules:       modeRules,
 		Charts:          chartFetcher,
+		Remote:          remoteClient,
 		FetchHosts:      cfg.FetchAllowedHosts,
 		Logger:          log,
 	}

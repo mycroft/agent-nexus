@@ -1,7 +1,7 @@
 // Package charts reads Helm chart packages from classic (HTTP) and OCI
-// repositories, so a review can see what a chart version change brings.
-// Packages are cached on disk and read in memory: their paths never reach
-// the filesystem.
+// repositories, through remote.Client, so a review can see what a chart
+// version change brings. Packages are cached on disk and read in memory:
+// their paths never reach the filesystem.
 package charts
 
 import (
@@ -17,7 +17,6 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -29,6 +28,8 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/mycroft/agent-nexus/internal/remote"
 )
 
 const (
@@ -37,7 +38,6 @@ const (
 	maxIndexBytes    = 32 << 20
 	maxPackageBytes  = 16 << 20
 	maxManifestBytes = 1 << 20
-	maxTokenBytes    = 64 << 10
 	// maxChartBytes and maxChartFiles bound a package once unpacked,
 	// subcharts included.
 	maxChartBytes = 64 << 20
@@ -45,13 +45,11 @@ const (
 	indexTTL      = time.Hour
 
 	helmLayerType = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
-	userAgent     = "agent-nexus"
 )
 
 var (
 	namePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
-	challengeParam = regexp.MustCompile(`(\w+)="([^"]*)"`)
 )
 
 // Chart is one version of a chart: its files, by path relative to the
@@ -77,7 +75,7 @@ func (c *Chart) Paths() []string {
 // chart version does not change, so packages are kept for good; indexes
 // are refreshed hourly.
 type Fetcher struct {
-	client *http.Client
+	remote *remote.Client
 	dir    string
 	now    func() time.Time
 	// mu serializes downloads, so concurrent reads of one chart fetch it
@@ -85,17 +83,14 @@ type Fetcher struct {
 	mu sync.Mutex
 }
 
-// New returns a fetcher caching under dir. A nil client means NewClient.
-func New(dir string, client *http.Client) (*Fetcher, error) {
+// New returns a fetcher caching under dir.
+func New(dir string, client *remote.Client) (*Fetcher, error) {
 	for _, sub := range []string{"packages", "index"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o750); err != nil {
 			return nil, fmt.Errorf("chart cache: %w", err)
 		}
 	}
-	if client == nil {
-		client = NewClient()
-	}
-	return &Fetcher{client: client, dir: dir, now: time.Now}, nil
+	return &Fetcher{remote: client, dir: dir, now: time.Now}, nil
 }
 
 // NormalizeRepoURL checks a chart repository URL, https:// or oci://, and
@@ -197,10 +192,11 @@ func (f *Fetcher) httpPackage(ctx context.Context, repo, name, version string) (
 	if pkgURL.Scheme != "https" {
 		return nil, fmt.Errorf("chart %s %s: refusing a package URL over %s", name, version, pkgURL.Scheme)
 	}
-	data, err := f.get(ctx, pkgURL.String(), "", "", maxPackageBytes)
+	resp, err := f.remote.Get(ctx, remote.Request{URL: pkgURL.String(), Limit: maxPackageBytes})
 	if err != nil {
 		return nil, err
 	}
+	data := resp.Body
 	if entry.Digest != "" {
 		if sum := sha256.Sum256(data); !strings.EqualFold(hex.EncodeToString(sum[:]), entry.Digest) {
 			return nil, fmt.Errorf("chart %s %s: package digest does not match the index", name, version)
@@ -216,9 +212,11 @@ func (f *Fetcher) indexEntries(ctx context.Context, repo, name string) ([]indexE
 	file := filepath.Join(f.dir, "index", hex.EncodeToString(sum[:])+".yaml")
 	data, err := os.ReadFile(file)
 	if info, statErr := os.Stat(file); err != nil || statErr != nil || f.now().Sub(info.ModTime()) > indexTTL {
-		if data, err = f.get(ctx, repo+"/index.yaml", "", "", maxIndexBytes); err != nil {
+		resp, err := f.remote.Get(ctx, remote.Request{URL: repo + "/index.yaml", Limit: maxIndexBytes})
+		if err != nil {
 			return nil, err
 		}
+		data = resp.Body
 		if err := writeFile(file, data); err != nil {
 			return nil, err
 		}
@@ -256,12 +254,11 @@ func (f *Fetcher) ociPackage(ctx context.Context, repo, name, version string) ([
 	repository := strings.Trim(u.Path+"/"+name, "/")
 	// OCI tags cannot hold "+"; Helm pushes it as "_".
 	tag := strings.ReplaceAll(version, "+", "_")
-	base := "https://" + u.Host + "/v2/" + repository
-	var token string
-	raw, err := f.ociGet(ctx, base+"/manifests/"+tag, "application/vnd.oci.image.manifest.v1+json", &token, maxManifestBytes)
+	resp, err := f.remote.RegistryGet(ctx, u.Host, repository, "manifests/"+tag, "application/vnd.oci.image.manifest.v1+json", maxManifestBytes)
 	if err != nil {
 		return nil, fmt.Errorf("chart %s %s: %w", name, version, err)
 	}
+	raw := resp.Body
 	var manifest struct {
 		Layers []struct {
 			MediaType string `json:"mediaType"`
@@ -283,121 +280,17 @@ func (f *Fetcher) ociPackage(ctx context.Context, repo, name, version string) ([
 		if l.Size > maxPackageBytes {
 			return nil, fmt.Errorf("chart %s %s: package of %d bytes exceeds %d", name, version, l.Size, maxPackageBytes)
 		}
-		data, err := f.ociGet(ctx, base+"/blobs/"+l.Digest, "", &token, maxPackageBytes)
+		blob, err := f.remote.RegistryGet(ctx, u.Host, repository, "blobs/"+l.Digest, "", maxPackageBytes)
 		if err != nil {
 			return nil, fmt.Errorf("chart %s %s: %w", name, version, err)
 		}
+		data := blob.Body
 		if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != strings.ToLower(digest) {
 			return nil, fmt.Errorf("chart %s %s: package digest does not match the manifest", name, version)
 		}
 		return data, nil
 	}
 	return nil, fmt.Errorf("chart %s %s: %s is not a Helm chart", name, version, repo)
-}
-
-// ociGet reads a registry URL, answering one bearer-token challenge with
-// an anonymous token, which is kept for the next requests.
-func (f *Fetcher) ociGet(ctx context.Context, rawURL, accept string, token *string, limit int64) ([]byte, error) {
-	data, err := f.get(ctx, rawURL, accept, *token, limit)
-	var unauthorized *challengeError
-	if !errors.As(err, &unauthorized) || *token != "" {
-		return data, err
-	}
-	if *token, err = f.anonymousToken(ctx, unauthorized.challenge); err != nil {
-		return nil, err
-	}
-	return f.get(ctx, rawURL, accept, *token, limit)
-}
-
-// challengeError is a 401 response with its WWW-Authenticate challenge.
-type challengeError struct{ challenge string }
-
-func (e *challengeError) Error() string { return "unauthorized" }
-
-func (f *Fetcher) anonymousToken(ctx context.Context, challenge string) (string, error) {
-	scheme, params, _ := strings.Cut(challenge, " ")
-	if !strings.EqualFold(scheme, "Bearer") {
-		return "", errors.New("the registry requires credentials")
-	}
-	values := map[string]string{}
-	for _, m := range challengeParam.FindAllStringSubmatch(params, -1) {
-		values[strings.ToLower(m[1])] = m[2]
-	}
-	realm, err := url.Parse(values["realm"])
-	if err != nil || realm.Scheme != "https" || realm.Host == "" {
-		return "", fmt.Errorf("unsupported token realm %q", values["realm"])
-	}
-	q := realm.Query()
-	for _, k := range []string{"service", "scope"} {
-		if v := values[k]; v != "" {
-			q.Set(k, v)
-		}
-	}
-	realm.RawQuery = q.Encode()
-	raw, err := f.get(ctx, realm.String(), "", "", maxTokenBytes)
-	if err != nil {
-		return "", fmt.Errorf("anonymous registry token: %w", err)
-	}
-	var tok struct {
-		Token       string `json:"token"`
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.Unmarshal(raw, &tok); err != nil {
-		return "", fmt.Errorf("anonymous registry token: %w", err)
-	}
-	if tok.Token == "" {
-		tok.Token = tok.AccessToken
-	}
-	if tok.Token == "" {
-		return "", errors.New("anonymous registry token: empty")
-	}
-	return tok.Token, nil
-}
-
-// get reads a URL, up to limit bytes.
-func (f *Fetcher) get(ctx context.Context, rawURL, accept, token string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	if accept != "" {
-		req.Header.Set("Accept", accept)
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := f.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", redact(rawURL), err)
-	}
-	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized && resp.Header.Get("WWW-Authenticate") != "":
-		return nil, &challengeError{challenge: resp.Header.Get("WWW-Authenticate")}
-	case resp.StatusCode != http.StatusOK:
-		return nil, fmt.Errorf("GET %s: %s", redact(rawURL), resp.Status)
-	case resp.ContentLength > limit:
-		return nil, fmt.Errorf("GET %s: %d bytes exceeds %d", redact(rawURL), resp.ContentLength, limit)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", redact(rawURL), err)
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("GET %s: more than %d bytes", redact(rawURL), limit)
-	}
-	return data, nil
-}
-
-// redact drops the query, which may carry a registry's token parameters.
-func redact(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "URL"
-	}
-	u.RawQuery = ""
-	return u.String()
 }
 
 // unpack reads a chart package; nested chart archives under charts/ are

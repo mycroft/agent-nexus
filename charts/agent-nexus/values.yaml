@@ -68,12 +68,13 @@ jobTimeout: 30m
 # How long agent transcripts are kept.
 transcriptRetention: 720h
 
-# The agent reads Helm chart versions (chart_files, chart_read, chart_diff)
-# from the chart repositories a reviewed repository's base branch already
-# references, anonymously and only from public addresses.
+# The agent reads Helm chart versions (chart_files, chart_read, chart_diff),
+# image release notes (release_notes) and documentation pages (fetch_url)
+# from what a reviewed repository's base branch already references,
+# anonymously and only from public addresses.
 fetch:
-  # Hosts it may also read charts from, e.g. for a repository added by the
-  # pull request under review.
+  # Hosts it may also read from: chart repositories, documentation sites,
+  # image registries.
   allowedHosts: []
   #  - charts.example.com
 # debug, info, warn or error

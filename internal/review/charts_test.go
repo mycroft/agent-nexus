@@ -9,6 +9,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/charts"
 	"github.com/mycroft/agent-nexus/internal/charts/chartstest"
 	"github.com/mycroft/agent-nexus/internal/llm"
+	"github.com/mycroft/agent-nexus/internal/remote"
 )
 
 func chartFixture(t *testing.T) (*fixture, string) {
@@ -20,7 +21,7 @@ func chartFixture(t *testing.T) (*fixture, string) {
 	f := newFixtureWith(t,
 		map[string]string{"versions.yaml": "demo/demo: 1.0.0\n", "repos.go": `const demoRepo = "` + repoURL + `/"` + "\n"},
 		map[string]string{"versions.yaml": "demo/demo: 1.1.0\n", "new.go": `const other = "https://charts.example.org/stable"` + "\n"})
-	fetcher, err := charts.New(t.TempDir(), srv.Client())
+	fetcher, err := charts.New(t.TempDir(), remote.New(srv.Client()))
 	if err != nil {
 		t.Fatal(err)
 	}

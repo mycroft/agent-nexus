@@ -240,3 +240,38 @@ func TestDiffBlobs(t *testing.T) {
 		t.Errorf("binary blobs = %q, %v", got, err)
 	}
 }
+
+func TestContainsBounded(t *testing.T) {
+	remote := gitrepotest.New(t, 1,
+		map[string]string{"values.yaml": "repo: https://prometheus-community.github.io/helm-charts\nimage: jhaals/yopass:15.0.0\n"},
+		map[string]string{"values.yaml": "x\n"})
+	cache, err := gitrepo.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := cache.Sync(context.Background(), gitrepo.Remote{Key: "t/o/r", URL: remote.Dir}, "main", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const host, image = "A-Za-z0-9.-", "A-Za-z0-9._/-"
+	for _, tc := range []struct {
+		literal, class string
+		want           bool
+	}{
+		{"prometheus-community.github.io", host, true},
+		{"community.github.io", host, false},
+		{"github.io", host, false},
+		{"prometheus-community.githubXio", host, false}, // "." is literal
+		{"jhaals/yopass", image, true},
+		{"haals/yopass", image, false},
+		{"jhaals/yopas", image, false},
+	} {
+		got, err := repo.ContainsBounded(context.Background(), remote.BaseSHA, tc.literal, tc.class)
+		if err != nil || got != tc.want {
+			t.Errorf("ContainsBounded(%q) = %v, %v; want %v", tc.literal, got, err, tc.want)
+		}
+	}
+	if _, err := repo.ContainsBounded(context.Background(), remote.BaseSHA, "a|b", host); err == nil {
+		t.Error("a literal with regexp syntax must be refused")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/diff"
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
+	"github.com/mycroft/agent-nexus/internal/remote"
 	"github.com/mycroft/agent-nexus/internal/tools"
 )
 
@@ -27,6 +28,7 @@ type workspace struct {
 	guidance      string
 	contextTokens int
 	charts        *charts.Fetcher
+	remote        *remote.Client
 	fetchHosts    []string
 }
 
@@ -63,7 +65,7 @@ func (r *Reviewer) prepare(ctx context.Context, f forge.Forge, repoID forge.Repo
 
 	w := &workspace{
 		repo: repo, baseSHA: baseSHA, headSHA: headSHA, files: files, byPath: map[string]*diff.File{},
-		contextTokens: r.ContextTokens, charts: r.Charts, fetchHosts: r.FetchHosts,
+		contextTokens: r.ContextTokens, charts: r.Charts, remote: r.Remote, fetchHosts: r.FetchHosts,
 	}
 	for _, file := range files {
 		w.byPath[file.Path()] = file
@@ -97,6 +99,9 @@ func (w *workspace) tools() []tools.Tool {
 	if w.charts != nil {
 		out = append(out, tools.Charts(w.charts, w.chartPolicy)...)
 	}
+	if w.remote != nil {
+		out = append(out, tools.Web(w.remote, tools.WebPolicy{Page: w.pagePolicy, Image: w.imagePolicy})...)
+	}
 	return out
 }
 
@@ -106,7 +111,63 @@ func (w *workspace) toolsSentence() string {
 	if w.charts != nil {
 		s += " chart_files, chart_read and chart_diff read published Helm chart versions, from the chart repositories the repository's base branch references."
 	}
+	if w.remote != nil {
+		s += " fetch_url reads documentation pages on hosts the base branch references, and release_notes the GitHub release notes of a container image it references."
+	}
 	return s
+}
+
+// Character classes around a hostname or an image name in the base
+// commit: "community.github.io" is not "prometheus-community.github.io",
+// "haals/yopass" is not "jhaals/yopass".
+const (
+	hostChars  = "A-Za-z0-9.-"
+	imageChars = "A-Za-z0-9._/-"
+)
+
+// pagePolicy admits a page whose host appears in the base commit, or is
+// on fetchHosts. Query strings are refused, so the model can only choose
+// a path on a host already in use.
+func (w *workspace) pagePolicy(ctx context.Context, rawURL string) error {
+	host, err := remote.PageHost(rawURL)
+	if err != nil {
+		return err
+	}
+	if w.allowedHost(host) {
+		return nil
+	}
+	found, err := w.repo.ContainsBounded(ctx, w.baseSHA, host, hostChars)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%s does not appear in the repository's base branch and is not an allowed host: only hosts the repository already references can be read", host)
+	}
+	return nil
+}
+
+// imagePolicy admits an image named in the base commit, or hosted on a
+// registry on fetchHosts.
+func (w *workspace) imagePolicy(ctx context.Context, image string) error {
+	host, _, err := remote.ParseImage(image)
+	if err != nil {
+		return err
+	}
+	if w.allowedHost(host) {
+		return nil
+	}
+	found, err := w.repo.ContainsBounded(ctx, w.baseSHA, image, imageChars)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("image %s does not appear in the repository's base branch: only images the repository already uses can be looked up", image)
+	}
+	return nil
+}
+
+func (w *workspace) allowedHost(host string) bool {
+	return slices.ContainsFunc(w.fetchHosts, func(h string) bool { return strings.EqualFold(h, host) })
 }
 
 // chartPolicy admits a chart repository URL that appears in the base
@@ -118,7 +179,7 @@ func (w *workspace) chartPolicy(ctx context.Context, repoURL string) error {
 	if err != nil {
 		return err
 	}
-	if slices.ContainsFunc(w.fetchHosts, func(h string) bool { return strings.EqualFold(h, host) }) {
+	if w.allowedHost(host) {
 		return nil
 	}
 	found, err := w.repo.Contains(ctx, w.baseSHA, norm)

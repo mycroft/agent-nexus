@@ -19,7 +19,7 @@ Their reply is a claim about the code. Check it before you agree or disagree:
 - **"It's handled elsewhere"** — find where. If you cannot find it, say what you looked at.
 - **"Fixed in a later commit"** — the tools read the current head of the pull request: check the line now.
 - **A question** — answer it from the code, citing the lines.
-- **About a chart version** — with the chart tools, read it (`chart_read`, `chart_diff`) instead of guessing.
+- **About a chart or image version** — with the tools, read it (`chart_read`, `chart_diff`, `release_notes`, `fetch_url`) instead of guessing.
 
 Stop once you can answer. Do not review unrelated code.
 

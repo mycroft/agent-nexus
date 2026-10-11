@@ -7,16 +7,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mycroft/agent-nexus/internal/remote"
 )
 
 // tgz builds a chart package: files under root/, and extra raw entries.
@@ -57,33 +57,6 @@ func digest(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func TestPublic(t *testing.T) {
-	for addr, want := range map[string]bool{
-		"51.15.191.121": true, "2001:bc8:6005:122::1": true, "185.199.108.153": true,
-		"127.0.0.1": false, "::1": false, "10.43.0.1": false, "10.42.3.188": false, "192.168.1.1": false,
-		"172.16.0.1": false, "169.254.169.254": false, "100.64.0.1": false, "0.0.0.0": false,
-		"fd00::1": false, "fe80::1": false, "::ffff:10.0.0.1": false, "64:ff9b::a00:1": false, "224.0.0.1": false,
-	} {
-		if got := Public(netip.MustParseAddr(addr)); got != want {
-			t.Errorf("Public(%s) = %v, want %v", addr, got, want)
-		}
-	}
-}
-
-func TestClientRefusesPrivateAddresses(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("the request reached a loopback server")
-	}))
-	defer srv.Close()
-	resp, err := NewClient().Get(srv.URL)
-	if err == nil {
-		resp.Body.Close()
-	}
-	if !errors.Is(err, ErrNotPublic) {
-		t.Errorf("err = %v, want ErrNotPublic", err)
-	}
-}
-
 func TestNormalizeRepoURL(t *testing.T) {
 	for raw, want := range map[string]string{
 		"https://charts.longhorn.io/":          "https://charts.longhorn.io",
@@ -106,7 +79,7 @@ func TestNormalizeRepoURL(t *testing.T) {
 
 func newFetcher(t *testing.T, srv *httptest.Server) *Fetcher {
 	t.Helper()
-	f, err := New(t.TempDir(), srv.Client())
+	f, err := New(t.TempDir(), remote.New(srv.Client()))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -296,6 +296,31 @@ func (r *Repo) Contains(ctx context.Context, rev, literal string) (bool, error) 
 	return err == nil, err
 }
 
+// ContainsBounded reports whether literal appears in a tracked text file at
+// rev with no character of class right before or after it, class being
+// the body of a bracket expression such as "A-Za-z0-9.-". For hostnames,
+// it tells "github.io" apart from "prometheus-community.github.io".
+// literal must be made of plain characters: only "." is escaped.
+func (r *Repo) ContainsBounded(ctx context.Context, rev, literal, class string) (bool, error) {
+	if err := checkSHAs(rev); err != nil {
+		return false, err
+	}
+	if !boundedLiteral.MatchString(literal) {
+		return false, fmt.Errorf("unsupported literal %q", literal)
+	}
+	pattern := "(^|[^" + class + "])" + strings.ReplaceAll(literal, ".", `\.`) + "($|[^" + class + "])"
+	_, err := r.run(ctx, readTimeout, nil, "grep", "-q", "-I", "-E", "--no-color", "-e", pattern, "--end-of-options", rev, "--")
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// boundedLiteral is what ContainsBounded searches for: hostnames, image
+// references, versions.
+var boundedLiteral = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$`)
+
 // DiffBlobs returns the unified diff (3 lines of context) turning a into
 // b, under the a/<label> and b/<label> names, or "" when they are equal.
 // The contents are written to temporary files with fixed names: label

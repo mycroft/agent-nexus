@@ -1,4 +1,4 @@
-package charts
+package remote
 
 import (
 	"errors"
@@ -47,12 +47,12 @@ func Public(ip netip.Addr) bool {
 	return true
 }
 
-// NewClient returns an HTTP client for the public internet only. Every
+// NewHTTPClient returns an HTTP client for the public internet only. Every
 // connection is checked on the address it actually dials, after DNS
 // resolution, so neither a hostname nor a redirect can reach the cluster,
 // the local network or the host. Proxy settings are ignored, and redirects
 // must stay on HTTPS.
-func NewClient() *http.Client {
+func NewHTTPClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout: 10 * time.Second,
 		Control: func(_, address string, _ syscall.RawConn) error {

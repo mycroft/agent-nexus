@@ -9,6 +9,7 @@ import (
 
 	"github.com/mycroft/agent-nexus/internal/charts"
 	"github.com/mycroft/agent-nexus/internal/charts/chartstest"
+	"github.com/mycroft/agent-nexus/internal/remote"
 )
 
 func chartTools(t *testing.T, allow ChartPolicy) (map[string]Tool, string) {
@@ -17,7 +18,7 @@ func chartTools(t *testing.T, allow ChartPolicy) (map[string]Tool, string) {
 		"1.0.0": {"Chart.yaml": "name: demo\nversion: 1.0.0\n", "values.yaml": "replicas: 1\nimage: demo:1.0\n", "templates/svc.yaml": "kind: Service\n", "README.md": "old\n"},
 		"1.1.0": {"Chart.yaml": "name: demo\nversion: 1.1.0\n", "values.yaml": "replicas: 1\nimage: demo:1.1\n", "templates/svc.yaml": "kind: Service\n", "templates/hpa.yaml": "kind: HorizontalPodAutoscaler\n"},
 	})
-	f, err := charts.New(t.TempDir(), srv.Client())
+	f, err := charts.New(t.TempDir(), remote.New(srv.Client()))
 	if err != nil {
 		t.Fatal(err)
 	}

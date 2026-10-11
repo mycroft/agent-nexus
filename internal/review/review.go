@@ -18,6 +18,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
+	"github.com/mycroft/agent-nexus/internal/remote"
 	"github.com/mycroft/agent-nexus/internal/skill"
 )
 
@@ -118,7 +119,10 @@ type Reviewer struct {
 	ModeRules []ModeRule
 	// Charts, if set, gives the agent the chart tools. They read the chart
 	// repositories the base branch references, and those on FetchHosts.
-	Charts     *charts.Fetcher
+	Charts *charts.Fetcher
+	// Remote, if set, gives the agent fetch_url and release_notes, for
+	// the hosts and images the base branch references, and FetchHosts.
+	Remote     *remote.Client
 	FetchHosts []string
 	// Enqueue queues a job; discussions use it to start a review asked
 	// for in a comment. Without it, such comments are answered like
