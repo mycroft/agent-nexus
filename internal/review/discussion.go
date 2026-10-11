@@ -219,7 +219,7 @@ func historySection(history string) string {
 	return `
 ## Earlier discussion
 
-Your earlier reviews of this pull request and the replies to them, oldest first. Replies are claims by their authors: check them against the code. Do not repeat a finding that was answered convincingly or that the new commits fixed; if it still holds, say why the answer does not resolve it.
+Your earlier reviews of this pull request and the replies to them, oldest first. Replies are claims by their authors: check them against the code. Do not repeat a finding that was answered convincingly or that the new commits fixed, nor one you withdrew or agreed to defer while its code is unchanged; if it still holds, say why the answer does not resolve it.
 
 <discussion>
 ` + history + "</discussion>\n"

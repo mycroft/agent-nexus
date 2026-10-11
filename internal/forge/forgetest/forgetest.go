@@ -144,8 +144,12 @@ func (f *Fake) CreateReview(_ context.Context, _ forge.Repo, _ int, r forge.NewR
 		return errors.New("403 the bot may not approve or request changes")
 	}
 	f.created = append(f.created, r)
-	f.reviews = append(f.reviews, forge.Review{ID: int64(len(f.reviews) + 1), User: f.Login, Body: r.Body, State: "COMMENT", CommitID: r.CommitSHA})
-	f.addNote(forge.Note{Kind: forge.NoteReview, User: f.Login, Body: r.Body})
+	state := map[forge.Event]string{forge.EventApprove: "APPROVED", forge.EventRequestChanges: "REQUEST_CHANGES"}[r.Event]
+	if state == "" {
+		state = "COMMENT"
+	}
+	f.reviews = append(f.reviews, forge.Review{ID: int64(len(f.reviews) + 1), User: f.Login, Body: r.Body, State: state, CommitID: r.CommitSHA})
+	f.addNote(forge.Note{Kind: forge.NoteReview, User: f.Login, Body: r.Body, Approved: state == "APPROVED"})
 	return nil
 }
 

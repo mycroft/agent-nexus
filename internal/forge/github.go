@@ -305,7 +305,7 @@ func (g *GitHub) ListNotes(ctx context.Context, repo Repo, number int) ([]Note, 
 	var notes []Note
 	for _, r := range reviews {
 		if r.State != "PENDING" && strings.TrimSpace(r.Body) != "" {
-			notes = append(notes, Note{Kind: NoteReview, ID: r.ID, User: r.User.Login, Body: r.Body, CreatedAt: r.SubmittedAt})
+			notes = append(notes, Note{Kind: NoteReview, ID: r.ID, User: r.User.Login, Body: r.Body, Approved: r.State == "APPROVED", CreatedAt: r.SubmittedAt})
 		}
 	}
 	type reviewComment struct {

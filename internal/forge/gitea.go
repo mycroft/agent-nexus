@@ -153,7 +153,7 @@ func (g *Gitea) ListNotes(ctx context.Context, repo Repo, number int) ([]Note, e
 			continue
 		}
 		if strings.TrimSpace(r.Body) != "" {
-			notes = append(notes, Note{Kind: NoteReview, ID: r.ID, User: r.User.Login, Body: r.Body, CreatedAt: r.SubmittedAt})
+			notes = append(notes, Note{Kind: NoteReview, ID: r.ID, User: r.User.Login, Body: r.Body, Approved: r.State == "APPROVED", CreatedAt: r.SubmittedAt})
 		}
 		if r.CommentsCount == 0 {
 			continue

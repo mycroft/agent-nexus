@@ -37,15 +37,27 @@ var replySchema = json.RawMessage(`{
   "required": ["reply"]
 }`)
 
+// settlingReplySchema is the answer's schema when the prompt lists open
+// findings: it also names those the conversation settles.
+var settlingReplySchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "reply": {"type": "string"},
+    "resolved": {"type": "array", "items": {"type": "integer"}}
+  },
+  "required": ["reply", "resolved"]
+}`)
+
 // DiscussionHandler returns the handler of DiscussionKind jobs.
 func (r *Reviewer) DiscussionHandler() jobs.Handler { return discussionHandler{r} }
 
 type discussionHandler struct{ r *Reviewer }
 
-// Handle answers the pending replies and mentions of a pull request. It
-// reads the whole discussion rather than the comment that triggered it:
-// the event may not identify the comment, and a missed event is caught up
-// by the next one.
+// Handle answers the pending replies and mentions of a pull request, then
+// approves it if the discussion settled every finding of the latest review
+// (see approveIfSettled). It reads the whole discussion rather than the
+// comment that triggered it: the event may not identify the comment, and a
+// missed event is caught up by the next one.
 func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.Run) (jobs.Result, error) {
 	r := h.r
 	var req DiscussionRequest
@@ -72,12 +84,8 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 	if err != nil {
 		return jobs.Result{}, err
 	}
-	asks := pendingAsks(notes, login)
-	if len(asks) == 0 {
-		return jobs.Result{Status: jobs.Skipped, Data: map[string]any{"outcome": "nothing_to_answer"}}, nil
-	}
-
-	// The checkout is only needed to answer with the model.
+	// The checkout is only needed to answer with the model, or to read
+	// the review mode before approving.
 	var ws *workspace
 	checkout := func() (*workspace, error) {
 		if ws != nil {
@@ -90,6 +98,19 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 		ws = w
 		return w, err
 	}
+	asks := pendingAsks(notes, login)
+	if len(asks) == 0 {
+		// A verdict update that failed in an earlier pass is retried.
+		approved, err := r.approveIfSettled(ctx, f, repoID, pr, latestReview(notes, login, pr.HeadSHA), checkout, job.ID)
+		if err != nil {
+			return jobs.Result{}, err
+		}
+		if approved {
+			return jobs.Result{Status: jobs.Succeeded, Data: map[string]any{"outcome": "approved", "approved": true}}, nil
+		}
+		return jobs.Result{Status: jobs.Skipped, Data: map[string]any{"outcome": "nothing_to_answer"}}, nil
+	}
+
 	command := reviewCommandPattern(login)
 	record := func(st agent.Step) {
 		run.Record(ctx, jobs.Step{
@@ -98,30 +119,47 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 		})
 	}
 	history := renderHistory(notes, login)
+	review := latestReview(notes, login, pr.HeadSHA)
 	batch := asks[:min(len(asks), maxAnswersPerJob)]
 	answered, answeredElsewhere := 0, 0
 	for _, a := range batch {
 		var text string
+		var resolved []int
 		if r.Enqueue != nil && command.MatchString(a.covered[len(a.covered)-1].Body) {
 			text, err = r.requestReview(ctx, f.Name(), repoID, pr, a)
 		} else {
 			var w *workspace
 			if w, err = checkout(); err == nil {
-				text, err = r.answer(ctx, f.Name(), repoID, pr, w, a, login, history, record)
+				text, resolved, err = r.answer(ctx, f.Name(), repoID, pr, w, a, login, history, review, record)
 			}
 		}
 		if err != nil {
 			return jobs.Result{}, err
 		}
-		posted, err := r.postAnswer(ctx, f, repoID, pr, a, login, text, job.ID)
+		settles := ""
+		if len(resolved) > 0 {
+			settles = resolvesMarker(review.Key, resolved)
+		}
+		posted, err := r.postAnswer(ctx, f, repoID, pr, a, login, text, settles, job.ID)
 		if err != nil {
 			return jobs.Result{}, err
 		}
 		if posted {
 			answered++
+			for _, n := range resolved {
+				review.Resolved[n] = true
+			}
 		} else {
 			answeredElsewhere++
 		}
+	}
+
+	if notes, err = f.ListNotes(ctx, repoID, req.PR); err != nil {
+		return jobs.Result{}, err
+	}
+	approved, err := r.approveIfSettled(ctx, f, repoID, pr, latestReview(notes, login, pr.HeadSHA), checkout, job.ID)
+	if err != nil {
+		return jobs.Result{}, err
 	}
 	return jobs.Result{Status: jobs.Succeeded, Data: map[string]any{
 		"outcome":            "answered",
@@ -129,6 +167,7 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 		"answered_elsewhere": answeredElsewhere,
 		// Left for the next pass, beyond this pass's batch.
 		"remaining": len(asks) - len(batch),
+		"approved":  approved,
 	}}, nil
 }
 
@@ -156,8 +195,9 @@ func (r *Reviewer) requestReview(ctx context.Context, forgeName string, repoID f
 	return fmt.Sprintf("Queued a new review of `%s` (job %d).", short(pr.HeadSHA), job.ID), nil
 }
 
-// answer runs the agent on one conversation and returns its reply.
-func (r *Reviewer) answer(ctx context.Context, forgeName string, repoID forge.Repo, pr forge.PR, ws *workspace, a ask, login, history string, record func(agent.Step)) (string, error) {
+// answer runs the agent on one conversation and returns its reply, and the
+// open findings of the latest review (numbered from 1) it settles.
+func (r *Reviewer) answer(ctx context.Context, forgeName string, repoID forge.Repo, pr forge.PR, ws *workspace, a ask, login, history string, review *reviewState, record func(agent.Step)) (string, []int, error) {
 	runner := &agent.Runner{
 		LLM:           r.LLM,
 		ContextTokens: r.ContextTokens,
@@ -167,17 +207,24 @@ func (r *Reviewer) answer(ctx context.Context, forgeName string, repoID forge.Re
 		Logger:        r.Logger,
 	}
 	system := discussionSystemPrompt(r.DiscussionSkill.Body, repoID, forgeName, pr, ws.guidanceName, ws.guidance)
-	user := discussionUserPrompt(repoID, forgeName, pr, ws, a, login, history)
+	findings := findingsSection(review)
+	user := discussionUserPrompt(repoID, forgeName, pr, ws, a, login, history) + findings
 	session, err := runner.Run(ctx, system, user, ws.tools())
 	if err != nil {
-		return "", fmt.Errorf("agent: %w", err)
+		return "", nil, fmt.Errorf("agent: %w", err)
+	}
+	schema := replySchema
+	if findings != "" {
+		schema = settlingReplySchema
 	}
 	var reply string
-	err = session.Finish(ctx, discussionFinalInstruction(session.TurnLimitReached),
-		llm.JSONSchema{Name: "pr_discussion_reply", Schema: replySchema},
+	var resolved []int
+	err = session.Finish(ctx, discussionFinalInstruction(session.TurnLimitReached, findings != ""),
+		llm.JSONSchema{Name: "pr_discussion_reply", Schema: schema},
 		func(raw []byte) error {
 			var out struct {
-				Reply string `json:"reply"`
+				Reply    string `json:"reply"`
+				Resolved []int  `json:"resolved"`
 			}
 			if err := json.Unmarshal(raw, &out); err != nil {
 				return fmt.Errorf("invalid JSON: %w", err)
@@ -185,18 +232,23 @@ func (r *Reviewer) answer(ctx context.Context, forgeName string, repoID forge.Re
 			if reply = strings.TrimSpace(out.Reply); reply == "" {
 				return errors.New("reply is empty")
 			}
+			resolved = out.Resolved
 			return nil
 		})
 	if err != nil {
-		return "", fmt.Errorf("agent: %w", err)
+		return "", nil, fmt.Errorf("agent: %w", err)
 	}
-	return reply, nil
+	if findings == "" {
+		return reply, nil, nil
+	}
+	return reply, review.openFindings(resolved), nil
 }
 
 // postAnswer posts the reply in the thread, or as a pull request comment
-// for a mention, unless another job answered meanwhile. It reports
-// whether it posted.
-func (r *Reviewer) postAnswer(ctx context.Context, f forge.Forge, repoID forge.Repo, pr forge.PR, a ask, login, text string, jobID int64) (bool, error) {
+// for a mention, unless another job answered meanwhile. settles is the
+// marker of the findings the answer settles, if any. It reports whether it
+// posted.
+func (r *Reviewer) postAnswer(ctx context.Context, f forge.Forge, repoID forge.Repo, pr forge.PR, a ask, login, text, settles string, jobID int64) (bool, error) {
 	number := pr.Number
 	notes, err := f.ListNotes(ctx, repoID, number)
 	if err != nil {
@@ -209,7 +261,7 @@ func (r *Reviewer) postAnswer(ctx context.Context, f forge.Forge, repoID forge.R
 		}
 	}
 
-	body := replyBody(a, text, jobID)
+	body := replyBody(a, text, settles, jobID)
 	if a.inline {
 		return true, f.ReplyInline(ctx, repoID, number, a.thread[0], body)
 	}
@@ -231,9 +283,9 @@ func (r *Reviewer) postAnswer(ctx context.Context, f forge.Forge, repoID forge.R
 }
 
 // replyBody formats an answer: a quote of the note for a mention (it is
-// posted apart from it), the text, a footer, and one marker per covered
-// note.
-func replyBody(a ask, text string, jobID int64) string {
+// posted apart from it), the text, a footer, one marker per covered note,
+// and the marker of the findings it settles.
+func replyBody(a ask, text, settles string, jobID int64) string {
 	var b strings.Builder
 	if !a.inline {
 		n := a.covered[0]
@@ -248,6 +300,9 @@ func replyBody(a ask, text string, jobID int64) string {
 	fmt.Fprintf(&b, "\n\n<sub>agent-nexus · job %d</sub>\n", jobID)
 	for _, n := range a.covered {
 		b.WriteString(replyMarker(n) + "\n")
+	}
+	if settles != "" {
+		b.WriteString(settles + "\n")
 	}
 	return b.String()
 }
@@ -302,13 +357,22 @@ func discussionUserPrompt(repo forge.Repo, forgeName string, pr forge.PR, ws *wo
 	return b.String()
 }
 
-func discussionFinalInstruction(turnLimitReached bool) string {
+func discussionFinalInstruction(turnLimitReached, settling bool) string {
 	var b strings.Builder
 	if turnLimitReached {
 		b.WriteString("You have reached the investigation limit. ")
 	}
-	b.WriteString(`Now write your answer as JSON: {"reply": "<markdown>"}.
+	if settling {
+		b.WriteString(`Now write your answer as JSON: {"reply": "<markdown>", "resolved": [<numbers>]}.`)
+	} else {
+		b.WriteString(`Now write your answer as JSON: {"reply": "<markdown>"}.`)
+	}
+	b.WriteString(`
 - Answer what was asked, in a few sentences; quote the code you rely on.
 - If they are right, say so plainly and withdraw the finding; if not, explain why with the evidence.`)
+	if settling {
+		b.WriteString(`
+- "resolved" lists the numbers of the open findings of your latest review that this conversation settles: you withdrew them, the head commit fixes them, or their author deferred them and you agree they need not block this pull request. Leave out a finding you keep, or one this conversation does not settle; use [] when none.`)
+	}
 	return b.String()
 }

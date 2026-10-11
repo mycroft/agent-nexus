@@ -60,7 +60,9 @@ func TestOutcome(t *testing.T) {
 	}{
 		{jobs.Succeeded, `{"verdict":"request_changes","event":"comment","findings":2}`, "comment · 2 findings"},
 		{jobs.Succeeded, `{"verdict":"approve","findings":1}`, "approve · 1 finding"},
-		{jobs.Succeeded, `{"outcome":"answered","answered":3}`, "3 answered"},
+		{jobs.Succeeded, `{"outcome":"answered","answered":3,"approved":false}`, "3 answered"},
+		{jobs.Succeeded, `{"outcome":"answered","answered":1,"approved":true}`, "1 answered · approved"},
+		{jobs.Succeeded, `{"outcome":"approved","approved":true}`, "approved"},
 		{jobs.Succeeded, `{"outcome":"already_posted"}`, "already posted"},
 		{jobs.Skipped, `{"outcome":"skipped_closed","verdict":"approve"}`, "pull request closed"},
 		{jobs.Skipped, `{"outcome":"something_new"}`, "something_new"},

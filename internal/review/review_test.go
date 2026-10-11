@@ -194,11 +194,23 @@ func TestDraftAndPost(t *testing.T) {
 		}
 	}
 	assertDefaultCommentMode(t, draft)
-	if strings.Contains(body, "Mod panics") || strings.Contains(body, "No evidence") {
+	if visible := findingsMarkerPattern.ReplaceAllString(body, ""); strings.Contains(visible, "Mod panics") || strings.Contains(visible, "No evidence") {
 		t.Errorf("body repeats inline or dropped findings:\n%s", body)
 	}
 	if !strings.Contains(draft.FallbackBody, "Mod panics") {
 		t.Error("fallback body must carry every finding")
+	}
+	// Both bodies list every finding, numbered in display order, for the
+	// discussion to settle.
+	for _, b := range []string{body, draft.FallbackBody} {
+		s := latestReview([]forge.Note{{Kind: forge.NoteReview, ID: 1, User: "agent-nexus", Body: b}}, "agent-nexus", f.remote.HeadSHA)
+		var titles []string
+		for _, fd := range s.Findings {
+			titles = append(titles, fd.Severity+":"+fd.Title)
+		}
+		if strings.Join(titles, ",") != "blocking:Mod panics when b is 0,question:Are there callers relying on the panic?,nit:Returning 0 hides the error" {
+			t.Errorf("listed findings = %v", titles)
+		}
 	}
 
 	outcome, err = f.reviewer.Post(ctx, f.req, draft)

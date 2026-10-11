@@ -376,12 +376,14 @@ var outcomeLabels = map[string]string{
 	"superseded":        "newer commit",
 	"already_posted":    "already posted",
 	"nothing_to_answer": "nothing to answer",
+	"approved":          "approved",
 }
 
 // Outcome is the job's result in a few words.
 func (v jobView) Outcome() string {
 	str := func(k string) string { s, _ := v.Result[k].(string); return s }
 	num := func(k string) int { n, _ := v.Result[k].(float64); return int(n) }
+	approved, _ := v.Result["approved"].(bool)
 	switch {
 	case v.Status == jobs.Failed:
 		return "failed"
@@ -398,6 +400,8 @@ func (v jobView) Outcome() string {
 		return fmt.Sprintf("%s · %d finding%s", str("event"), num("findings"), plural(num("findings")))
 	case str("verdict") != "":
 		return fmt.Sprintf("%s · %d finding%s", str("verdict"), num("findings"), plural(num("findings")))
+	case str("outcome") == "answered" && approved:
+		return fmt.Sprintf("%d answered · approved", num("answered"))
 	case str("outcome") == "answered":
 		return fmt.Sprintf("%d answered", num("answered"))
 	default:

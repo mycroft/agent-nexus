@@ -22,6 +22,9 @@ type footer struct {
 	// Warning, if set, is shown above the footer (e.g. an invalid
 	// repository config file).
 	Warning string
+	// Findings is the marker listing the review's findings, which
+	// discussion answers refer to by number (see findingsMarker).
+	Findings string
 }
 
 // verdict is the verdict a review is submitted with, in verdict mode.
@@ -53,6 +56,9 @@ func render(out Output, files []*diff.File, f footer, v *verdict) (forge.NewRevi
 		return slices.Index(severities, a.Severity) - slices.Index(severities, b.Severity)
 	})
 
+	if len(findings) > 0 {
+		f.Findings = findingsMarker(findings)
+	}
 	review := forge.NewReview{CommitSHA: f.HeadSHA, Event: forge.EventComment}
 	if v != nil {
 		review.Event = v.Event
@@ -93,6 +99,9 @@ func renderBody(out Output, findings []Finding, inlined int, f footer, v *verdic
 	}
 	fmt.Fprintf(&b, "\n---\n<sub>agent-nexus · reviewed %s · %s · %d turns · peak context %d tokens · %d tokens generated · job %d</sub>\n%s\n",
 		short(f.HeadSHA), f.Model, f.Turns, f.PeakPromptTokens, f.CompletionTokens, f.JobID, f.Marker)
+	if f.Findings != "" {
+		b.WriteString(f.Findings + "\n")
+	}
 	return b.String()
 }
 

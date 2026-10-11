@@ -118,7 +118,9 @@ type Note struct {
 	Path string
 	Line int
 	// Thread groups an inline note with the replies to it.
-	Thread    string
+	Thread string
+	// Approved marks a review note whose review approves the pull request.
+	Approved  bool
 	CreatedAt time.Time
 }
 

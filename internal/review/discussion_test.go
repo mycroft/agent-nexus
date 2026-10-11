@@ -133,14 +133,14 @@ func TestCleanNote(t *testing.T) {
 
 func TestReplyBody(t *testing.T) {
 	reply := inline(2, "alice", "a", "why?", 2)
-	got := replyBody(ask{inline: true, covered: []forge.Note{reply, inline(3, "bob", "a", "+1", 3)}}, "Because.", 9)
+	got := replyBody(ask{inline: true, covered: []forge.Note{reply, inline(3, "bob", "a", "+1", 3)}}, "Because.", resolvesMarker("review:7", []int{2}), 9)
 	if strings.Contains(got, "> ") || !strings.HasPrefix(got, "Because.") ||
 		!strings.Contains(got, "<sub>agent-nexus · job 9</sub>") ||
-		!strings.Contains(got, replyMarker(reply)) || !strings.Contains(got, "reply-to=inline:3") {
+		!strings.Contains(got, replyMarker(reply)) || !strings.Contains(got, "reply-to=inline:3") || !strings.Contains(got, "<!-- agent-nexus:resolves=review:7#2 -->") {
 		t.Errorf("inline reply body:\n%s", got)
 	}
 	mention := comment(5, "carol", "@agent-nexus is this safe?\nsecond line", 5)
-	got = replyBody(ask{thread: []forge.Note{mention}, covered: []forge.Note{mention}}, "Yes.", 9)
+	got = replyBody(ask{thread: []forge.Note{mention}, covered: []forge.Note{mention}}, "Yes.", "", 9)
 	if !strings.HasPrefix(got, "> **@carol**:\n> @agent-nexus is this safe?\n> second line\n\nYes.") || !strings.Contains(got, replyMarker(mention)) {
 		t.Errorf("mention reply body:\n%s", got)
 	}

@@ -277,7 +277,8 @@ func TestGiteaNotes(t *testing.T) {
 		_, _ = io.WriteString(w, `[
 			{"id":1,"user":{"login":"agent-nexus"},"state":"COMMENT","body":"## Summary","comments_count":1,"submitted_at":"2026-01-01T00:00:01Z"},
 			{"id":2,"user":{"login":"agent-nexus"},"state":"PENDING","body":"draft","comments_count":1,"submitted_at":"2026-01-01T00:00:02Z"},
-			{"id":3,"user":{"login":"alice"},"state":"APPROVED","body":"","comments_count":0,"submitted_at":"2026-01-01T00:00:09Z"}]`)
+			{"id":3,"user":{"login":"alice"},"state":"APPROVED","body":"LGTM","comments_count":0,"submitted_at":"2026-01-01T00:00:09Z"},
+			{"id":4,"user":{"login":"carol"},"state":"APPROVED","body":"","comments_count":0,"submitted_at":"2026-01-01T00:00:10Z"}]`)
 	})
 	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews/1/comments", func(w http.ResponseWriter, _ *http.Request) {
 		// A finding, the reply stored in the same review on the same
@@ -316,9 +317,12 @@ func TestGiteaNotes(t *testing.T) {
 	for _, n := range notes {
 		got = append(got, fmt.Sprintf("%s/%s/%s/%d", n.Key(), n.User, n.Thread, n.Line))
 	}
-	want := "review:1/agent-nexus//0,inline:10/agent-nexus/1:a.go:12/12,inline:11/agent-nexus/1:a.go:-12/0,comment:20/bob//0,inline:12/alice/1:a.go:12/12"
+	want := "review:1/agent-nexus//0,inline:10/agent-nexus/1:a.go:12/12,inline:11/agent-nexus/1:a.go:-12/0,comment:20/bob//0,inline:12/alice/1:a.go:12/12,review:3/alice//0"
 	if strings.Join(got, ",") != want {
-		t.Errorf("notes =\n%s\nwant\n%s", strings.Join(got, ","), want)
+		t.Fatalf("notes =\n%s\nwant\n%s", strings.Join(got, ","), want)
+	}
+	if notes[0].Approved || !notes[5].Approved {
+		t.Errorf("approved = %v, %v; want only alice's review", notes[0].Approved, notes[5].Approved)
 	}
 
 	if err := g.ReplyInline(ctx, repo, 3, notes[1], "answer"); err != nil {
@@ -346,7 +350,8 @@ func TestGitHubNotes(t *testing.T) {
 		_, _ = io.WriteString(w, `{"token":"inst","expires_at":"2099-01-01T00:00:00Z"}`)
 	})
 	mux.HandleFunc("GET /repos/o/r/pulls/5/reviews", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `[{"id":1,"user":{"login":"agent-nexus[bot]"},"state":"COMMENTED","body":"summary","submitted_at":"2026-01-01T00:00:01Z"}]`)
+		_, _ = io.WriteString(w, `[{"id":1,"user":{"login":"agent-nexus[bot]"},"state":"COMMENTED","body":"summary","submitted_at":"2026-01-01T00:00:01Z"},
+			{"id":2,"user":{"login":"alice"},"state":"APPROVED","body":"LGTM","submitted_at":"2026-01-01T00:00:03Z"}]`)
 	})
 	mux.HandleFunc("GET /repos/o/r/pulls/5/comments", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `[
@@ -373,8 +378,11 @@ func TestGitHubNotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(notes) != 3 || notes[1].Thread != "10" || notes[2].Thread != "10" || notes[2].User != "alice" {
+	if len(notes) != 4 || notes[1].Thread != "10" || notes[2].Thread != "10" || notes[2].User != "alice" {
 		t.Fatalf("notes = %+v", notes)
+	}
+	if notes[0].Approved || !notes[3].Approved {
+		t.Errorf("approved = %v, %v; want only alice's review", notes[0].Approved, notes[3].Approved)
 	}
 	if err := g.ReplyInline(ctx, repo, 5, notes[1], "answer"); err != nil || repliedTo != "10" {
 		t.Errorf("reply to %q: %v", repliedTo, err)

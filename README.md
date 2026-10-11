@@ -99,6 +99,10 @@ Each repository is reviewed in one of two modes:
 If the forge refuses the verdict, for example because the bot may only
 comment, the review is posted as a comment.
 
+The verdict also follows the discussion. Once every finding of the bot's
+latest review of the head is settled in replies, it approves the pull
+request without a new review (see [Discussion](#discussion)).
+
 The mode comes from the first of these that applies:
 
 1. **A central rule naming the repository exactly.**
@@ -160,6 +164,23 @@ then either withdraws the finding or keeps it, with evidence.
 A new review also reads the earlier discussion: its previous reviews,
 the threads it took part in, and the PR comments. It doesn't repeat a
 finding that was answered convincingly or fixed since.
+
+**Settling findings.** Each review lists its findings in a hidden
+`<!-- agent-nexus:findings=… -->` marker. An answer says which findings of
+the latest review of the head it settles:
+
+- the bot withdrew it;
+- the head commit fixes it;
+- its author deferred it, and the bot agrees it needn't block the PR.
+
+It records them in a hidden `<!-- agent-nexus:resolves=… -->` marker; only
+the bot's own markers count.
+
+In a `verdict` repository, once every finding is settled, agent-nexus
+submits an approval: a "verdict update" listing the findings. No new
+review runs. It then counts as the latest review, so it is submitted only
+once. A new commit, or a requested review, starts over with that review's
+findings.
 
 **Asking for another review.** A commit is normally reviewed once. To get
 a new review of the current head, do either of these:
