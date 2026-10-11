@@ -213,6 +213,12 @@ agent-nexus answers:
   review bodies and inline comments. It answers with a PR comment that
   quotes the message.
 
+This works on closed and merged PRs too, for questions about a change
+after it landed. The diff then comes from the merge base the forge
+recorded, since the base branch now holds the PR. Reviews, review
+requests and approvals remain for open PRs: `@agent-nexus review` on a
+closed one gets a reply saying so.
+
 It doesn't use the comment that triggered the event. Each pass reads the
 whole discussion and answers what is still waiting, so a missed event is
 caught up by the next one:
@@ -279,8 +285,7 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
   queues a pass over the pull request's discussion, which answers what is
   waiting for the bot.
   - `202` with `{"job_id"}`. A newer event replaces a queued pass; a running
-    pass finishes.
-  - `200` when the PR is closed.
+    pass finishes. Closed and merged PRs are discussed too.
 - `GET /v1/jobs` lists recent jobs, newest first, with their payload
   (forge, repository, PR) and their progress so far:
   - progress fields: `turns`, `peak_prompt_tokens`, `prompt_tokens`,

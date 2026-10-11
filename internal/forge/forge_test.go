@@ -50,8 +50,8 @@ func TestGitea(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		_, _ = io.WriteString(w, `{"number":3,"title":"T","body":"B","user":{"login":"me"},"state":"open","draft":true,
-			"html_url":"https://g/o/r/pulls/3","base":{"ref":"main","sha":"b"},"head":{"sha":"h"}}`)
+		_, _ = io.WriteString(w, `{"number":3,"title":"T","body":"B","user":{"login":"me"},"state":"closed","merged":true,"draft":true,
+			"html_url":"https://g/o/r/pulls/3","merge_base":"mb","base":{"ref":"main","sha":"b"},"head":{"sha":"h"}}`)
 	})
 	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `[
@@ -78,7 +78,9 @@ func TestGitea(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := PR{Number: 3, Title: "T", Body: "B", Author: "me", State: "open", Draft: true, BaseRef: "main", HeadSHA: "h", URL: "https://g/o/r/pulls/3"}
+	// Gitea's base.sha is the branch tip, which holds a merged pull
+	// request: merge_base is the commit it was diffed against.
+	want := PR{Number: 3, Title: "T", Body: "B", Author: "me", State: "closed", Merged: true, Draft: true, BaseRef: "main", HeadSHA: "h", MergeBase: "mb", URL: "https://g/o/r/pulls/3"}
 	if pr != want {
 		t.Errorf("GetPR = %+v, want %+v", pr, want)
 	}
@@ -194,8 +196,8 @@ func TestGitHubAppAuth(t *testing.T) {
 		_, _ = io.WriteString(w, `{"token":"inst-token","expires_at":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`)
 	}))
 	mux.HandleFunc("GET /repos/o/r/pulls/5", installation(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"number":5,"title":"T","user":{"login":"me"},"state":"open","draft":false,
-			"base":{"ref":"main"},"head":{"sha":"h"}}`)
+		_, _ = io.WriteString(w, `{"number":5,"title":"T","user":{"login":"me"},"state":"closed","merged":true,"draft":false,
+			"base":{"ref":"main","sha":"b"},"head":{"sha":"h"}}`)
 	}))
 	mux.HandleFunc("POST /repos/o/r/pulls/5/reviews", installation(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&review)
@@ -217,8 +219,12 @@ func TestGitHubAppAuth(t *testing.T) {
 		t.Fatalf("BotLogin = %q, %v", login, err)
 	}
 	for range 3 {
-		if _, err := g.GetPR(ctx, repo, 5); err != nil {
+		pr, err := g.GetPR(ctx, repo, 5)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if !pr.Merged || pr.MergeBase != "b" {
+			t.Errorf("GetPR = %+v, want merged with merge base b", pr)
 		}
 	}
 	if installCalls.Load() != 1 || tokenCalls.Load() != 1 {

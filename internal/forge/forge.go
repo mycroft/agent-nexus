@@ -54,10 +54,15 @@ type PR struct {
 	Body    string
 	Author  string
 	State   string // "open" or "closed"
+	Merged  bool
 	Draft   bool
 	BaseRef string
 	HeadSHA string
-	URL     string
+	// MergeBase is the base commit the forge diffs the pull request
+	// against. Once it is merged, the base branch holds the pull request,
+	// so this is how its changes are told apart.
+	MergeBase string
+	URL       string
 }
 
 // Review is an existing review on a pull request.

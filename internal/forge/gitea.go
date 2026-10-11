@@ -70,14 +70,16 @@ func (g *Gitea) BotLogin(ctx context.Context) (string, error) {
 // GetPR implements Forge.
 func (g *Gitea) GetPR(ctx context.Context, repo Repo, number int) (PR, error) {
 	var pr struct {
-		Number  int       `json:"number"`
-		Title   string    `json:"title"`
-		Body    string    `json:"body"`
-		User    giteaUser `json:"user"`
-		State   string    `json:"state"`
-		Draft   bool      `json:"draft"`
-		HTMLURL string    `json:"html_url"`
-		Base    struct {
+		Number    int       `json:"number"`
+		Title     string    `json:"title"`
+		Body      string    `json:"body"`
+		User      giteaUser `json:"user"`
+		State     string    `json:"state"`
+		Merged    bool      `json:"merged"`
+		Draft     bool      `json:"draft"`
+		HTMLURL   string    `json:"html_url"`
+		MergeBase string    `json:"merge_base"`
+		Base      struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
 		Head struct {
@@ -89,15 +91,17 @@ func (g *Gitea) GetPR(ctx context.Context, repo Repo, number int) (PR, error) {
 		return PR{}, fmt.Errorf("gitea: %w", err)
 	}
 	return PR{
-		Number:  pr.Number,
-		Title:   pr.Title,
-		Body:    pr.Body,
-		Author:  pr.User.Login,
-		State:   pr.State,
-		Draft:   pr.Draft,
-		BaseRef: pr.Base.Ref,
-		HeadSHA: pr.Head.SHA,
-		URL:     pr.HTMLURL,
+		Number:    pr.Number,
+		Title:     pr.Title,
+		Body:      pr.Body,
+		Author:    pr.User.Login,
+		State:     pr.State,
+		Merged:    pr.Merged,
+		Draft:     pr.Draft,
+		BaseRef:   pr.Base.Ref,
+		HeadSHA:   pr.Head.SHA,
+		MergeBase: pr.MergeBase,
+		URL:       pr.HTMLURL,
 	}, nil
 }
 

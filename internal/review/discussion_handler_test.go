@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mycroft/agent-nexus/internal/forge"
+	"github.com/mycroft/agent-nexus/internal/gitrepo/gitrepotest"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
 	"github.com/mycroft/agent-nexus/internal/skill"
@@ -152,18 +153,60 @@ func TestDiscussionFallsBackToReviewForComments(t *testing.T) {
 	}
 }
 
-func TestDiscussionSkipsClosedAndQuietPullRequests(t *testing.T) {
+func TestDiscussionSkipsQuietPullRequests(t *testing.T) {
 	f := discussionFixture(t)
 	if job := runDiscussion(t, f); job.Status != jobs.Skipped || !strings.Contains(string(job.Result), "nothing_to_answer") {
 		t.Errorf("quiet = %s %s", job.Status, job.Result)
 	}
-	f.forge.AddNote(forge.Note{Kind: forge.NoteComment, User: "bob", Body: "@agent-nexus ping"})
-	f.forge.SetPR(forge.PR{Number: 4, State: "closed", BaseRef: "main", HeadSHA: f.remote.HeadSHA})
-	if job := runDiscussion(t, f); job.Status != jobs.Skipped || !strings.Contains(string(job.Result), string(SkippedClosed)) {
-		t.Errorf("closed = %s %s", job.Status, job.Result)
-	}
 	if len(f.llm.requests) != 0 {
 		t.Error("skipped passes must not call the LLM")
+	}
+}
+
+// mergePR fast-forwards the fixture's base branch to the pull request's
+// head, as a merge does, and marks it merged.
+func mergePR(t *testing.T, f *fixture) {
+	t.Helper()
+	gitrepotest.Git(t, f.remote.Dir, "update-ref", "refs/heads/main", f.remote.HeadSHA)
+	f.forge.SetPR(forge.PR{Number: 4, Title: "Guard division", Author: "dev", State: "closed", Merged: true,
+		BaseRef: "main", HeadSHA: f.remote.HeadSHA, MergeBase: f.remote.BaseSHA})
+}
+
+func TestDiscussionAnswersOnMergedPullRequests(t *testing.T) {
+	f := discussionFixture(t)
+	mergePR(t, f)
+	mention := f.forge.AddNote(forge.Note{Kind: forge.NoteComment, User: "bob", Body: "@agent-nexus what did this change?"})
+	replyScript(f.llm, "It guards Div against zero and adds Mod.")
+
+	job := runDiscussion(t, f)
+	if job.Status != jobs.Succeeded || !strings.Contains(string(job.Result), `"answered":1`) {
+		t.Fatalf("job = %s %s %s", job.Status, job.Error, job.Result)
+	}
+	if posted := f.forge.Replies(); len(posted) != 1 || !strings.Contains(posted[0].Body, replyMarker(mention)) {
+		t.Errorf("answer = %+v", posted)
+	}
+	// The base branch now holds the change: the diff comes from the
+	// recorded merge base.
+	prompt := f.llm.requests[0].Messages[1].Content
+	for _, want := range []string{"State: merged", "Base: main @ " + f.remote.BaseSHA[:7], "calc/calc.go"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestDiscussionDoesNotReviewClosedPullRequests(t *testing.T) {
+	f := discussionFixture(t)
+	f.reviewer.Enqueue = func(context.Context, jobs.NewJob) (jobs.Job, bool, error) {
+		t.Error("a review was queued for a closed pull request")
+		return jobs.Job{}, false, nil
+	}
+	mergePR(t, f)
+	f.forge.AddNote(forge.Note{Kind: forge.NoteComment, User: "mycroft", Body: "@agent-nexus review"})
+	job := runDiscussion(t, f)
+	posted := f.forge.Replies()
+	if job.Status != jobs.Succeeded || len(posted) != 1 || !strings.Contains(posted[0].Body, "This pull request is closed: only open pull requests are reviewed.") {
+		t.Errorf("job = %s %s, answer = %+v", job.Status, job.Result, posted)
 	}
 }
 

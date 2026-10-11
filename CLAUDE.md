@@ -23,7 +23,7 @@ The flow is event → job → handler → agent → forge.
 - **`internal/review`:** the `pr_review` handler.
   - `Draft` gathers the PR, diff and base-branch `AGENTS.md`, runs the agent, then makes one final schema-constrained call.
   - `Post` is idempotent: it looks for the `<!-- agent-nexus:sha=… -->` marker before posting.
-- **`internal/review` (discussion):** the `pr_discussion` handler (`DiscussionHandler`). `POST /v1/events/pr-comment` queues one with `KeepRunning`, so a newer pass replaces a queued one and a running one finishes.
+- **`internal/review` (discussion):** the `pr_discussion` handler (`DiscussionHandler`). `POST /v1/events/pr-comment` queues one with `KeepRunning`, so a newer pass replaces a queued one and a running one finishes. Closed and merged pull requests are discussed too; `prepare` then diffs from `PR.MergeBase`, because the base branch holds the change. Reviews and approvals stay for open pull requests.
   - `pendingAsks` finds human replies in threads the bot took part in, and mentions of `@agent-nexus`, that no reply marker covers.
   - Answers follow `skills/pr-discussion`.
   - `renderHistory` feeds the same discussion to later reviews.

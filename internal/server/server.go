@@ -120,10 +120,6 @@ func (s *Server) readEvent(w http.ResponseWriter, r *http.Request) *checkedEvent
 		writeError(w, http.StatusBadGateway, "could not read the pull request from the forge")
 		return nil
 	}
-	if pr.State != "open" {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored", "reason": "pull request is not open"})
-		return nil
-	}
 	return &checkedEvent{body: ev, forge: f, repo: repo, pr: pr, log: log}
 }
 
@@ -140,6 +136,9 @@ func (s *Server) prReviewEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	log := ev.log.With("head_sha", body.HeadSHA)
 	switch {
+	case ev.pr.State != "open":
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored", "reason": "pull request is not open"})
+		return
 	case ev.pr.HeadSHA != body.HeadSHA:
 		// A late event must not supersede the job of a newer commit.
 		log.InfoContext(ctx, "ignoring stale event", "current_head_sha", ev.pr.HeadSHA)
@@ -161,8 +160,9 @@ func (s *Server) prReviewEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 // prCommentEvent queues a pass over the pull request's discussion, which
-// answers the replies and mentions waiting for the bot. Each event gets its
-// own job: a newer one replaces a queued one, and a running one finishes.
+// answers the replies and mentions waiting for the bot, closed pull
+// requests included. Each event gets its own job: a newer one replaces a
+// queued one, and a running one finishes.
 func (s *Server) prCommentEvent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ev := s.readEvent(w, r)

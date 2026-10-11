@@ -69,12 +69,11 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 		return jobs.Result{}, err
 	}
 	repoID := forge.Repo{Owner: req.Owner, Name: req.Repo}
+	// Closed pull requests are discussed too: people ask about a merged
+	// change. Only reviews and approvals are for open ones.
 	pr, err := f.GetPR(ctx, repoID, req.PR)
 	if err != nil {
 		return jobs.Result{}, err
-	}
-	if pr.State != "open" {
-		return jobs.Result{Status: jobs.Skipped, Data: map[string]any{"outcome": SkippedClosed}}, nil
 	}
 	login, err := f.BotLogin(ctx)
 	if err != nil {
@@ -181,7 +180,10 @@ func reviewCommandPattern(login string) *regexp.Regexp {
 // requestReview queues a forced review of the pull request's head, as
 // asked in a comment, and returns the answer saying so.
 func (r *Reviewer) requestReview(ctx context.Context, forgeName string, repoID forge.Repo, pr forge.PR, a ask) (string, error) {
-	if pr.Draft {
+	switch {
+	case pr.State != "open":
+		return "This pull request is closed: only open pull requests are reviewed. Ask me about it here instead.", nil
+	case pr.Draft:
 		return "This pull request is a draft: it is reviewed once it is ready.", nil
 	}
 	asker := a.covered[len(a.covered)-1].User
@@ -328,8 +330,8 @@ When you are done investigating, reply in plain text without calling any tool. Y
 
 func discussionUserPrompt(repo forge.Repo, forgeName string, pr forge.PR, ws *workspace, a ask, login, history string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "<pull-request>\nRepository: %s (%s)\nPull request: #%d: %s\nAuthor: %s\nBase: %s @ %s; head: %s\n</pull-request>\n\n## Changed files\n\n",
-		repo, forgeName, pr.Number, pr.Title, pr.Author, pr.BaseRef, short(ws.baseSHA), short(ws.headSHA))
+	fmt.Fprintf(&b, "<pull-request>\nRepository: %s (%s)\nPull request: #%d: %s\nAuthor: %s\nState: %s\nBase: %s @ %s; head: %s\n</pull-request>\n\n## Changed files\n\n",
+		repo, forgeName, pr.Number, pr.Title, pr.Author, prState(pr), pr.BaseRef, short(ws.baseSHA), short(ws.headSHA))
 	for _, f := range ws.files {
 		fmt.Fprintf(&b, "- %s %s (+%d -%d)\n", f.Status, displayPath(f), f.Additions, f.Deletions)
 	}
@@ -355,6 +357,19 @@ func discussionUserPrompt(repo forge.Repo, forgeName string, pr forge.PR, ws *wo
 	}
 	fmt.Fprintf(&b, "\nAnswer the latest message(s) from %s.\n", strings.Join(a.askers(), ", "))
 	return b.String()
+}
+
+func prState(pr forge.PR) string {
+	switch {
+	case pr.Merged:
+		return "merged"
+	case pr.State != "open":
+		return "closed without merging"
+	case pr.Draft:
+		return "open, draft"
+	default:
+		return "open"
+	}
 }
 
 func discussionFinalInstruction(turnLimitReached, settling bool) string {

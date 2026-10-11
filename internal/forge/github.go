@@ -224,10 +224,12 @@ func (g *GitHub) GetPR(ctx context.Context, repo Repo, number int) (PR, error) {
 		Body    string     `json:"body"`
 		User    githubUser `json:"user"`
 		State   string     `json:"state"`
+		Merged  bool       `json:"merged"`
 		Draft   bool       `json:"draft"`
 		HTMLURL string     `json:"html_url"`
 		Base    struct {
 			Ref string `json:"ref"`
+			SHA string `json:"sha"`
 		} `json:"base"`
 		Head struct {
 			SHA string `json:"sha"`
@@ -238,15 +240,17 @@ func (g *GitHub) GetPR(ctx context.Context, repo Repo, number int) (PR, error) {
 		return PR{}, fmt.Errorf("github: %w", err)
 	}
 	return PR{
-		Number:  pr.Number,
-		Title:   pr.Title,
-		Body:    pr.Body,
-		Author:  pr.User.Login,
-		State:   pr.State,
-		Draft:   pr.Draft,
-		BaseRef: pr.Base.Ref,
-		HeadSHA: pr.Head.SHA,
-		URL:     pr.HTMLURL,
+		Number:    pr.Number,
+		Title:     pr.Title,
+		Body:      pr.Body,
+		Author:    pr.User.Login,
+		State:     pr.State,
+		Merged:    pr.Merged,
+		Draft:     pr.Draft,
+		BaseRef:   pr.Base.Ref,
+		HeadSHA:   pr.Head.SHA,
+		MergeBase: pr.Base.SHA,
+		URL:       pr.HTMLURL,
 	}, nil
 }
 

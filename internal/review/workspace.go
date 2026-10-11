@@ -51,6 +51,12 @@ func (r *Reviewer) prepare(ctx context.Context, f forge.Forge, repoID forge.Repo
 	if err != nil {
 		return nil, "", err
 	}
+	// Once merged, the base branch holds the pull request: diffing against
+	// it would show nothing. The forge's recorded merge base still tells
+	// the pull request's changes apart.
+	if pr.State != "open" && pr.MergeBase != "" && repo.HasCommit(ctx, pr.MergeBase) {
+		baseSHA = pr.MergeBase
+	}
 	rawDiff, err := repo.Diff(ctx, baseSHA, headSHA)
 	if errors.Is(err, gitrepo.ErrTruncated) {
 		return nil, "", fmt.Errorf("diff exceeds %d bytes; too large to review", gitrepo.MaxOutput)

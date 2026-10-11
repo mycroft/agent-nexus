@@ -200,7 +200,8 @@ func TestPRCommentEvent(t *testing.T) {
 	if code, _ := postTo(t, srv, "/v1/events/pr-comment", "", comment(1)); code != http.StatusUnauthorized {
 		t.Errorf("no key → %d", code)
 	}
-	if code, body := postTo(t, srv, "/v1/events/pr-comment", apiKey, comment(3)); code != http.StatusOK || body["status"] != "ignored" {
+	// Closed pull requests are discussed too (only reviews skip them).
+	if code, body := postTo(t, srv, "/v1/events/pr-comment", apiKey, comment(3)); code != http.StatusAccepted || body["status"] != "queued" {
 		t.Errorf("closed PR → %d %v", code, body)
 	}
 	if code, _ := postTo(t, srv, "/v1/events/pr-comment", apiKey, PREvent{ServerURL: "https://git.example.com", Repo: "someone/repo", PR: 1}); code != http.StatusForbidden {
