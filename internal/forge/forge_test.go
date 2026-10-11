@@ -380,3 +380,24 @@ func TestGitHubNotes(t *testing.T) {
 		t.Errorf("reply to %q: %v", repliedTo, err)
 	}
 }
+
+// Without the read:issue scope, review threads are still listed.
+func TestGiteaNotesWithoutIssueScope(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":1,"user":{"login":"agent-nexus"},"state":"COMMENT","body":"","comments_count":1,"submitted_at":"2026-01-01T00:00:01Z"}]`)
+	})
+	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews/1/comments", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":10,"user":{"login":"agent-nexus"},"body":"finding","path":"a.go","position":1,"created_at":"2026-01-01T00:00:01Z"}]`)
+	})
+	mux.HandleFunc("GET /api/v1/repos/o/r/issues/3/comments", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"token does not have at least one of required scope(s), required=[read:issue]"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	notes, err := NewGitea(srv.URL, "agent-nexus", "tok", fastRetry).ListNotes(context.Background(), Repo{Owner: "o", Name: "r"}, 3)
+	if err != nil || len(notes) != 1 || notes[0].Kind != NoteInline {
+		t.Fatalf("notes = %+v, %v", notes, err)
+	}
+}

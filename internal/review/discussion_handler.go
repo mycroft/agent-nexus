@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/mycroft/agent-nexus/internal/agent"
@@ -76,13 +77,20 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 		return jobs.Result{Status: jobs.Skipped, Data: map[string]any{"outcome": "nothing_to_answer"}}, nil
 	}
 
-	ws, _, err := r.prepare(ctx, f, repoID, pr, pr.HeadSHA)
-	if err != nil {
-		return jobs.Result{}, err
+	// The checkout is only needed to answer with the model.
+	var ws *workspace
+	checkout := func() (*workspace, error) {
+		if ws != nil {
+			return ws, nil
+		}
+		w, _, err := r.prepare(ctx, f, repoID, pr, pr.HeadSHA)
+		if err == nil && w == nil {
+			err = errors.New("the pull request head moved while fetching it")
+		}
+		ws = w
+		return w, err
 	}
-	if ws == nil {
-		return jobs.Result{}, errors.New("the pull request head moved while fetching it")
-	}
+	command := reviewCommandPattern(login)
 	record := func(st agent.Step) {
 		run.Record(ctx, jobs.Step{
 			Role: st.Role, ToolName: st.ToolName, Content: st.Content,
@@ -93,7 +101,15 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 	batch := asks[:min(len(asks), maxAnswersPerJob)]
 	answered, answeredElsewhere := 0, 0
 	for _, a := range batch {
-		text, err := r.answer(ctx, f.Name(), repoID, pr, ws, a, login, history, record)
+		var text string
+		if r.Enqueue != nil && command.MatchString(a.covered[len(a.covered)-1].Body) {
+			text, err = r.requestReview(ctx, f.Name(), repoID, pr, a)
+		} else {
+			var w *workspace
+			if w, err = checkout(); err == nil {
+				text, err = r.answer(ctx, f.Name(), repoID, pr, w, a, login, history, record)
+			}
+		}
 		if err != nil {
 			return jobs.Result{}, err
 		}
@@ -114,6 +130,30 @@ func (h discussionHandler) Handle(ctx context.Context, job *jobs.Job, run *jobs.
 		// Left for the next pass, beyond this pass's batch.
 		"remaining": len(asks) - len(batch),
 	}}, nil
+}
+
+// reviewCommandPattern matches a comment asking the bot for a review:
+// "@agent-nexus review", "@agent-nexus review again", "@agent-nexus re-review".
+func reviewCommandPattern(login string) *regexp.Regexp {
+	name := regexp.QuoteMeta(strings.TrimSuffix(login, "[bot]"))
+	return regexp.MustCompile(`(?i)(^|[^\w.-])@` + name + `[,:]?\s+(re-?)?review\b`)
+}
+
+// requestReview queues a forced review of the pull request's head, as
+// asked in a comment, and returns the answer saying so.
+func (r *Reviewer) requestReview(ctx context.Context, forgeName string, repoID forge.Repo, pr forge.PR, a ask) (string, error) {
+	if pr.Draft {
+		return "This pull request is a draft: it is reviewed once it is ready.", nil
+	}
+	asker := a.covered[len(a.covered)-1].User
+	job, _, err := r.Enqueue(ctx, Job(Request{
+		Forge: forgeName, Owner: repoID.Owner, Repo: repoID.Name,
+		PR: pr.Number, HeadSHA: pr.HeadSHA, Force: true,
+	}, "comment:"+asker))
+	if err != nil {
+		return "", fmt.Errorf("queue the requested review: %w", err)
+	}
+	return fmt.Sprintf("Queued a new review of `%s` (job %d).", short(pr.HeadSHA), job.ID), nil
 }
 
 // answer runs the agent on one conversation and returns its reply.

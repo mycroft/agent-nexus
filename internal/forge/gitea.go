@@ -2,7 +2,9 @@ package forge
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -190,7 +192,14 @@ func (g *Gitea) ListNotes(ctx context.Context, repo Repo, number int) ([]Note, e
 		Body      string    `json:"body"`
 		CreatedAt time.Time `json:"created_at"`
 	}
-	if err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number), g.auth, nil, &comments); err != nil {
+	err = g.api.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number), g.auth, nil, &comments)
+	var statusErr *httpclient.StatusError
+	switch {
+	case errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusForbidden:
+		// Pull request comments need the read:issue token scope. Review
+		// threads still work without them.
+		slog.WarnContext(ctx, "gitea: cannot read pull request comments; give the token the read:issue scope", "repo", repo.String(), "pr", number)
+	case err != nil:
 		return nil, fmt.Errorf("gitea: %w", err)
 	}
 	for _, c := range comments {

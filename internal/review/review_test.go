@@ -482,3 +482,40 @@ func itoa(n int) string {
 	raw, _ := json.Marshal(n)
 	return string(raw)
 }
+
+func TestJob(t *testing.T) {
+	req := Request{Forge: "gitea", Owner: "O", Repo: "R", PR: 3, HeadSHA: "abc"}
+	j := Job(req, "key")
+	if j.Kind != Kind || j.GroupKey != "gitea:o/r#3" || j.DedupeKey != "gitea:o/r#3@abc" || j.APIKeyName != "key" {
+		t.Errorf("job = %+v", j)
+	}
+	req.Force = true
+	a, b := Job(req, "key"), Job(req, "key")
+	if a.GroupKey != j.GroupKey || !strings.HasPrefix(a.DedupeKey, j.DedupeKey+"@forced@") || a.DedupeKey == b.DedupeKey {
+		t.Errorf("forced jobs = %q, %q", a.DedupeKey, b.DedupeKey)
+	}
+}
+
+// A forced review of an already reviewed commit is posted, and only once.
+func TestForcedReviewIsPostedOnce(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.forge.AddReview(forge.Review{ID: 1, User: "agent-nexus", State: "APPROVED", Body: "earlier " + marker(f.remote.HeadSHA)})
+	f.script(sampleOutput)
+	req := f.req
+	req.Force = true
+	draft, _, err := f.reviewer.Draft(ctx, req, 31, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<!-- agent-nexus:sha=" + f.remote.HeadSHA + ":job=31 -->"
+	if draft.Marker != want || !strings.Contains(draft.Review.Body, want) || strings.Contains(draft.Review.Body, marker(f.remote.HeadSHA)) {
+		t.Fatalf("marker = %q, body:\n%s", draft.Marker, draft.Review.Body)
+	}
+	if outcome, err := f.reviewer.Post(ctx, req, draft); err != nil || outcome != Posted {
+		t.Fatalf("Post = %s, %v", outcome, err)
+	}
+	if outcome, err := f.reviewer.Post(ctx, req, draft); err != nil || outcome != AlreadyPosted {
+		t.Fatalf("second Post = %s, %v", outcome, err)
+	}
+}

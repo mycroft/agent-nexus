@@ -17,6 +17,8 @@ type footer struct {
 	PeakPromptTokens int
 	CompletionTokens int
 	JobID            int64
+	// Marker is the hidden tag identifying the review (see reviewMarker).
+	Marker string
 	// Warning, if set, is shown above the footer (e.g. an invalid
 	// repository config file).
 	Warning string
@@ -90,7 +92,7 @@ func renderBody(out Output, findings []Finding, inlined int, f footer, v *verdic
 		fmt.Fprintf(&b, "\n> [!WARNING]\n> %s\n", oneLine(f.Warning))
 	}
 	fmt.Fprintf(&b, "\n---\n<sub>agent-nexus · reviewed %s · %s · %d turns · peak context %d tokens · %d tokens generated · job %d</sub>\n%s\n",
-		short(f.HeadSHA), f.Model, f.Turns, f.PeakPromptTokens, f.CompletionTokens, f.JobID, marker(f.HeadSHA))
+		short(f.HeadSHA), f.Model, f.Turns, f.PeakPromptTokens, f.CompletionTokens, f.JobID, f.Marker)
 	return b.String()
 }
 

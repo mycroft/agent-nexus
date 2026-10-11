@@ -63,6 +63,9 @@ type PREvent struct {
 	Repo    string `json:"repo"`
 	PR      int    `json:"pr"`
 	HeadSHA string `json:"head_sha"`
+	// Force reviews the commit again even if it was reviewed already
+	// (a review was requested from the bot).
+	Force bool `json:"force,omitempty"`
 }
 
 // checkedEvent is a validated event: its body, and its forge, repository and
@@ -124,10 +127,6 @@ func (s *Server) readEvent(w http.ResponseWriter, r *http.Request) *checkedEvent
 	return &checkedEvent{body: ev, forge: f, repo: repo, pr: pr, log: log}
 }
 
-func groupKey(f forge.Forge, repo forge.Repo, pr int) string {
-	return fmt.Sprintf("%s:%s#%d", f.Name(), strings.ToLower(repo.String()), pr)
-}
-
 func (s *Server) prReviewEvent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ev := s.readEvent(w, r)
@@ -151,20 +150,14 @@ func (s *Server) prReviewEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	group := groupKey(ev.forge, ev.repo, body.PR)
-	s.enqueue(w, r, log, "review", jobs.NewJob{
-		Kind:       review.Kind,
-		GroupKey:   group,
-		DedupeKey:  group + "@" + body.HeadSHA,
-		APIKeyName: auth.KeyName(ctx),
-		Payload: review.Request{
-			Forge:   ev.forge.Name(),
-			Owner:   ev.repo.Owner,
-			Repo:    ev.repo.Name,
-			PR:      body.PR,
-			HeadSHA: body.HeadSHA,
-		},
-	})
+	s.enqueue(w, r, log, "review", review.Job(review.Request{
+		Forge:   ev.forge.Name(),
+		Owner:   ev.repo.Owner,
+		Repo:    ev.repo.Name,
+		PR:      body.PR,
+		HeadSHA: body.HeadSHA,
+		Force:   body.Force,
+	}, auth.KeyName(ctx)))
 }
 
 // prCommentEvent queues a pass over the pull request's discussion, which
@@ -177,7 +170,7 @@ func (s *Server) prCommentEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := ev.body
-	group := groupKey(ev.forge, ev.repo, body.PR) + ":discussion"
+	group := review.GroupKey(ev.forge.Name(), ev.repo, body.PR) + ":discussion"
 	s.enqueue(w, r, ev.log, "discussion", jobs.NewJob{
 		Kind:        review.DiscussionKind,
 		GroupKey:    group,

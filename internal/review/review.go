@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/mycroft/agent-nexus/internal/agent"
 	"github.com/mycroft/agent-nexus/internal/forge"
@@ -38,9 +39,39 @@ type Request struct {
 	Repo    string `json:"repo"`
 	PR      int    `json:"pr"`
 	HeadSHA string `json:"head_sha"`
+	// Force reviews the commit again even if it was reviewed already, as
+	// asked by a review request or an "@agent-nexus review" comment.
+	Force bool `json:"force,omitempty"`
 }
 
 func (r Request) repo() forge.Repo { return forge.Repo{Owner: r.Owner, Name: r.Repo} }
+
+// GroupKey groups the review jobs of one pull request: a newer one
+// supersedes the older unfinished ones.
+func GroupKey(forgeName string, repo forge.Repo, pr int) string {
+	return fmt.Sprintf("%s:%s#%d", forgeName, strings.ToLower(repo.String()), pr)
+}
+
+// Job builds the job reviewing req. One review job lives per commit;
+// a forced review gets a key of its own, so it runs even after one.
+func Job(req Request, apiKeyName string) jobs.NewJob {
+	group := GroupKey(req.Forge, req.repo(), req.PR)
+	dedupe := group + "@" + req.HeadSHA
+	if req.Force {
+		dedupe += fmt.Sprintf("@forced@%d", time.Now().UnixNano())
+	}
+	return jobs.NewJob{Kind: Kind, GroupKey: group, DedupeKey: dedupe, APIKeyName: apiKeyName, Payload: req}
+}
+
+// reviewMarker tags a review with what it covers: the commit, and for a
+// forced review the job, so a forced review is not mistaken for the
+// commit's earlier one.
+func reviewMarker(req Request, jobID int64) string {
+	if req.Force {
+		return fmt.Sprintf("<!-- agent-nexus:sha=%s:job=%d -->", req.HeadSHA, jobID)
+	}
+	return marker(req.HeadSHA)
+}
 
 // Outcome is what happened to a review request.
 type Outcome string
@@ -65,8 +96,10 @@ type Draft struct {
 	Usage        llm.Usage       `json:"usage"`
 	PeakPrompt   int             `json:"peak_prompt_tokens"`
 	Turns        int             `json:"turns"`
-	Mode         Mode            `json:"mode"`
-	ModeSource   string          `json:"mode_source"`
+	// Marker identifies the posted review (see reviewMarker).
+	Marker     string `json:"marker"`
+	Mode       Mode   `json:"mode"`
+	ModeSource string `json:"mode_source"`
 }
 
 // Reviewer produces and posts reviews.
@@ -82,7 +115,11 @@ type Reviewer struct {
 	MaxTurns        int
 	// ModeRules is the central review mode configuration (see resolveMode).
 	ModeRules []ModeRule
-	Logger    *slog.Logger
+	// Enqueue queues a job; discussions use it to start a review asked
+	// for in a comment. Without it, such comments are answered like
+	// questions.
+	Enqueue func(context.Context, jobs.NewJob) (jobs.Job, bool, error)
+	Logger  *slog.Logger
 }
 
 // Handle implements jobs.Handler.
@@ -244,6 +281,7 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		PeakPromptTokens: session.PeakPromptTokens,
 		CompletionTokens: session.Usage.CompletionTokens,
 		JobID:            jobID,
+		Marker:           reviewMarker(req, jobID),
 		Warning:          configWarning,
 	}, v)
 	return &Draft{
@@ -254,6 +292,7 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		Usage:        session.Usage,
 		PeakPrompt:   session.PeakPromptTokens,
 		Turns:        session.Turns,
+		Marker:       reviewMarker(req, jobID),
 		Mode:         mode,
 		ModeSource:   modeSource,
 	}, Drafted, nil
@@ -280,6 +319,15 @@ func (r *Reviewer) reviewMode(ctx context.Context, repo *gitrepo.Repo, baseSHA s
 	}
 	mode, source := resolveMode(r.ModeRules, repoID, fileMode)
 	return mode, source, warning
+}
+
+// marker returns the draft's marker; checkpoints from before markers were
+// stored carry the commit's.
+func (d *Draft) marker() string {
+	if d.Marker != "" {
+		return d.Marker
+	}
+	return marker(d.HeadSHA)
 }
 
 // cleanFindings normalizes paths and drops findings without evidence, which
@@ -315,7 +363,7 @@ func (r *Reviewer) Post(ctx context.Context, req Request, d *Draft) (Outcome, er
 	if o := checkPR(pr, d.HeadSHA); o != "" {
 		return o, nil
 	}
-	posted, err := r.alreadyPosted(ctx, f, repoID, req.PR, d.HeadSHA)
+	posted, err := r.alreadyPosted(ctx, f, repoID, req.PR, d.marker())
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +379,7 @@ func (r *Reviewer) Post(ctx context.Context, req Request, d *Draft) (Outcome, er
 			// A failed attempt may still have gone through, or left a
 			// pending review behind.
 			r.logger().WarnContext(ctx, "review rejected, retrying a simpler one", "error", err, "event", review.Event, "inline_comments", len(review.Comments))
-			posted, perr := r.alreadyPosted(ctx, f, repoID, req.PR, d.HeadSHA)
+			posted, perr := r.alreadyPosted(ctx, f, repoID, req.PR, d.marker())
 			if perr != nil {
 				return "", perr
 			}
@@ -364,7 +412,7 @@ func postAttempts(d *Draft) []forge.NewReview {
 	return attempts
 }
 
-func (r *Reviewer) alreadyPosted(ctx context.Context, f forge.Forge, repo forge.Repo, pr int, headSHA string) (bool, error) {
+func (r *Reviewer) alreadyPosted(ctx context.Context, f forge.Forge, repo forge.Repo, pr int, mark string) (bool, error) {
 	login, err := f.BotLogin(ctx)
 	if err != nil {
 		return false, err
@@ -374,7 +422,7 @@ func (r *Reviewer) alreadyPosted(ctx context.Context, f forge.Forge, repo forge.
 		return false, err
 	}
 	for _, rv := range reviews {
-		if strings.EqualFold(rv.User, login) && rv.State != "PENDING" && strings.Contains(rv.Body, marker(headSHA)) {
+		if strings.EqualFold(rv.User, login) && rv.State != "PENDING" && strings.Contains(rv.Body, mark) {
 			return true, nil
 		}
 	}

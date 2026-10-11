@@ -192,6 +192,7 @@ func serve() error {
 		return out, err
 	}))
 	queue := jobs.NewQueue(store, cfg.LLMConcurrency, cfg.JobTimeout, cfg.TranscriptRetention, log)
+	a.reviewer.Enqueue = queue.Enqueue
 	queue.Register(review.Kind, a.reviewer)
 	queue.Register(review.DiscussionKind, a.reviewer.DiscussionHandler())
 

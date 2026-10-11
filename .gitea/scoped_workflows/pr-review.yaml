@@ -9,8 +9,9 @@ name: agent-nexus
 on:
   pull_request:
     # Gitea has no ready_for_review: leaving draft (WIP) fires "edited".
-    # Title-only edits are deduplicated by agent-nexus.
-    types: [opened, synchronize, reopened, edited]
+    # Title-only edits are deduplicated by agent-nexus. Requesting a
+    # review from agent-nexus reviews the head again.
+    types: [opened, synchronize, reopened, edited, review_requested]
   # Replies and mentions: agent-nexus answers replies in its own review
   # threads, and comments mentioning @agent-nexus. Gitea reports a reply in
   # a review thread as an issue_comment.
@@ -27,7 +28,9 @@ env:
 jobs:
   request-review:
     name: Request review
-    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    if: >-
+      ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft
+      && (github.event.action != 'review_requested' || github.event.requested_reviewer.login == 'agent-nexus') }}
     runs-on: ubuntu-latest
     steps:
       - name: Send pull request event
@@ -37,14 +40,16 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # A requested review runs even if this commit was reviewed.
+          FORCE: ${{ github.event.action == 'review_requested' }}
         run: |
           if [ -z "${API_KEY}" ]; then
             echo "::warning::AGENT_NEXUS_API_KEY is not set; skipping the review request"
             exit 0
           fi
           payload=$(jq -n --arg server_url "${SERVER_URL}" --arg repo "${REPO}" \
-            --argjson pr "${PR}" --arg head_sha "${HEAD_SHA}" \
-            '{server_url: $server_url, repo: $repo, pr: $pr, head_sha: $head_sha}')
+            --argjson pr "${PR}" --arg head_sha "${HEAD_SHA}" --argjson force "${FORCE}" \
+            '{server_url: $server_url, repo: $repo, pr: $pr, head_sha: $head_sha, force: $force}')
           curl -fsS --retry 3 --retry-connrefused --max-time 60 \
             -H "Authorization: Bearer ${API_KEY}" \
             -H "Content-Type: application/json" \

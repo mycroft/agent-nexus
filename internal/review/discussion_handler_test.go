@@ -194,3 +194,45 @@ func mustNotes(t *testing.T, f *fixture) []forge.Note {
 	}
 	return notes
 }
+
+func TestDiscussionReviewCommand(t *testing.T) {
+	f := discussionFixture(t)
+	var queued []jobs.NewJob
+	f.reviewer.Enqueue = func(_ context.Context, nj jobs.NewJob) (jobs.Job, bool, error) {
+		queued = append(queued, nj)
+		return jobs.Job{ID: 42}, true, nil
+	}
+	ask := f.forge.AddNote(forge.Note{Kind: forge.NoteComment, User: "mycroft", Body: "@agent-nexus review again"})
+	job := runDiscussion(t, f)
+	if job.Status != jobs.Succeeded {
+		t.Fatalf("job = %s %s", job.Status, job.Error)
+	}
+	if len(queued) != 1 {
+		t.Fatalf("queued %d jobs", len(queued))
+	}
+	var req Request
+	raw, _ := json.Marshal(queued[0].Payload)
+	_ = json.Unmarshal(raw, &req)
+	if queued[0].Kind != Kind || !req.Force || req.HeadSHA != f.remote.HeadSHA || queued[0].APIKeyName != "comment:mycroft" {
+		t.Errorf("queued %+v with %+v", queued[0], req)
+	}
+	posted := f.forge.Replies()
+	if len(posted) != 1 || !strings.Contains(posted[0].Body, "Queued a new review of `"+f.remote.HeadSHA[:7]+"` (job 42).") || !strings.Contains(posted[0].Body, replyMarker(ask)) {
+		t.Errorf("answer = %+v", posted)
+	}
+	if len(f.llm.requests) != 0 {
+		t.Error("a review command must not call the LLM")
+	}
+
+	for body, want := range map[string]bool{
+		"@agent-nexus review":                 true,
+		"@agent-nexus: re-review please":      true,
+		"@Agent-Nexus rereview":               true,
+		"@agent-nexus what does review mean?": false,
+		"please @agent-nexus":                 false,
+	} {
+		if got := reviewCommandPattern("agent-nexus").MatchString(body); got != want {
+			t.Errorf("review command %q = %v, want %v", body, got, want)
+		}
+	}
+}

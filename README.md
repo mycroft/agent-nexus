@@ -160,14 +160,31 @@ A new review also reads the earlier discussion: its previous reviews,
 the threads it took part in, and the PR comments. It doesn't repeat a
 finding that was answered convincingly or fixed since.
 
-PR comments need the Gitea token to have the `write:issue` scope. Without
-it, agent-nexus answers mentions with a comment-only review instead.
+**Asking for another review.** A commit is normally reviewed once. To get
+a new review of the current head, do either of these:
+
+- request a review from `agent-nexus` in the PR's reviewers (Gitea);
+- comment `@agent-nexus review`, `@agent-nexus review again` or
+  `@agent-nexus re-review`.
+
+Either way, the review runs even if that commit was already reviewed. The
+comment is answered with the queued job's number, without asking the
+model.
+
+**Token scopes.** Reading PR comments needs the Gitea token's `read:issue`
+scope; without it, agent-nexus sees review threads only.
+- Mentions in PR comments, and those comments in the earlier discussion,
+  need `read:issue`.
+- Answering mentions with a PR comment needs `write:issue`. Without it,
+  agent-nexus answers with a comment-only review instead.
 
 ## API
 
 All `/v1` routes require `Authorization: Bearer <api key>`.
 
-- `POST /v1/events/pr-review` takes `{"server_url", "repo", "pr", "head_sha"}`.
+- `POST /v1/events/pr-review` takes `{"server_url", "repo", "pr", "head_sha"}`,
+  and optionally `"force": true` to review a commit that was already
+  reviewed.
   - `202` with `{"job_id"}` when the review is queued.
   - `200` when it is a duplicate of a live or finished job, when the
     event is stale, or when the PR is a draft or closed.
@@ -258,6 +275,8 @@ Pushing a `vX.Y.Z` tag releases both artifacts:
    - `write:repository`, to fetch the code, post reviews and reply in
      threads;
    - `read:user`, to look up its own login;
+   - `read:issue`, to read PR comments: mentions, and the earlier
+     discussion;
    - optionally `write:issue`, to answer mentions with a PR comment
      instead of a review.
 2. **Actions secret.** Add a user-level Actions secret named
@@ -265,8 +284,11 @@ Pushing a `vX.Y.Z` tag releases both artifacts:
 3. **Scoped workflow.** Register
    [`.gitea/scoped_workflows/pr-review.yaml`](.gitea/scoped_workflows/pr-review.yaml)
    under User Settings → Actions → Scoped Workflows. It then runs on every
-   repository you own, and a repository can opt out. It sends pull request
-   events to `pr-review`, and comment and review events to `pr-comment`.
+   repository you own, and a repository can opt out. It sends events to
+   two endpoints:
+   - pull request events to `pr-review`, including review requests
+     addressed to `agent-nexus`, which are sent with `force: true`;
+   - comment and review events to `pr-comment`.
 4. **GitHub mirror.** Push-mirror this repository to
    `github.com/mycroft/agent-nexus`, so GitHub repositories can use the
    reusable workflow.

@@ -290,3 +290,32 @@ func TestListJobs(t *testing.T) {
 		}
 	}
 }
+
+// A requested review runs again on an already reviewed commit.
+func TestForcedPREvent(t *testing.T) {
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	_, body := post(t, srv, apiKey, event(1, head))
+	first := int64(body["job_id"].(float64))
+	if _, err := store.Claim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Finish(ctx, first, jobs.Succeeded, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := post(t, srv, apiKey, event(1, head)); code != http.StatusOK || body["duplicate"] != true {
+		t.Errorf("same commit → %d %v, want a duplicate", code, body)
+	}
+	forced := event(1, head)
+	forced.Force = true
+	code, body := post(t, srv, apiKey, forced)
+	if code != http.StatusAccepted {
+		t.Fatalf("forced → %d %v", code, body)
+	}
+	job, _ := store.Get(ctx, int64(body["job_id"].(float64)))
+	var req review.Request
+	_ = json.Unmarshal(job.Payload, &req)
+	if !req.Force || job.GroupKey != "gitea:mycroft/repo#1" {
+		t.Errorf("forced job = %+v, payload %+v", job, req)
+	}
+}
