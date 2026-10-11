@@ -39,3 +39,22 @@ func TestOpenRepoPolicy(t *testing.T) {
 		t.Error("the tools sentence does not mention the repo tools")
 	}
 }
+
+func TestOpenRepoOnAForgeUnderAPath(t *testing.T) {
+	f := newFixtureWith(t,
+		map[string]string{"charts.go": "// Source: https://git.example.com/gitea/o/lib\n"},
+		map[string]string{"new.go": "x\n"})
+	f.forge.URL = "https://git.example.com/gitea/"
+	ctx := context.Background()
+	pr, _ := f.forge.GetPR(ctx, f.req.repo(), 4)
+	ws, _, err := f.reviewer.prepare(ctx, f.forge, f.req.repo(), pr, f.remote.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := ws.openRepo(ctx, "o/lib", []string{"main"}); err != nil {
+		t.Errorf("a repository referenced under the forge's path: %v", err)
+	}
+	if _, _, _, err := ws.openRepo(ctx, "o/other", []string{"main"}); err == nil || !strings.Contains(err.Error(), "git.example.com/gitea/o/other does not appear") {
+		t.Errorf("an unreferenced repository: %v", err)
+	}
+}

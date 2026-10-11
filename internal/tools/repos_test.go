@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -67,6 +68,39 @@ func TestRepoTools(t *testing.T) {
 	}
 	if len(*opened) != 5 {
 		t.Errorf("opened %d times, want once per call", len(*opened))
+	}
+}
+
+func TestCut(t *testing.T) {
+	if got := cut("short", 10); got != "short" {
+		t.Errorf("cut under the limit = %q", got)
+	}
+	if got := cut(strings.Repeat("x", 20), 8); got != "xxxxxxxx\n[…cut; narrow the range for the rest]\n" {
+		t.Errorf("cut over the limit = %q", got)
+	}
+}
+
+func TestRepoLogCutsLongLogs(t *testing.T) {
+	remote := gitrepotest.New(t, 1, map[string]string{"a": "1\n"}, map[string]string{"a": "2\n"})
+	// A release whose log exceeds the tool's budget.
+	for i := range 40 {
+		gitrepotest.Git(t, remote.Dir, "commit", "--allow-empty", "-q", "-m", fmt.Sprintf("change %d\n\n%s", i, strings.Repeat("detail ", 60)))
+	}
+	gitrepotest.Git(t, remote.Dir, "tag", "v1.0.0", remote.BaseSHA)
+	gitrepotest.Git(t, remote.Dir, "tag", "v2.0.0", "HEAD")
+	cache, err := gitrepo.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := func(ctx context.Context, _ string, refs []string) (*gitrepo.Repo, map[string]string, []string, error) {
+		return cache.FetchRefs(ctx, gitrepo.Remote{Key: "test/o/big", URL: remote.Dir}, refs)
+	}
+	out, err := call(t, Repos(open)[0], map[string]any{"repo": "o/big", "from": "1.0.0", "to": "2.0.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > maxRepoLogBytes+maxRepoStatBytes+512 || !strings.Contains(out, "[…cut; narrow the range for the rest]") || !strings.Contains(out, "change 39") {
+		t.Errorf("repo_log of a long range: %d bytes, cut marker or newest commit missing", len(out))
 	}
 }
 

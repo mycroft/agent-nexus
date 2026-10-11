@@ -146,8 +146,8 @@ var repoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-
 // openRepo fetches the given tags or branches of another repository of the
 // forge, with the forge's credentials: the bot reads what it may read on
 // the forge. The repository must be the one under review, or appear in
-// the base commit as "<forge host>/<owner>/<name>" (a chart's sources, a
-// link), so the model can only name repositories already in use.
+// the base commit as "<forge host and path>/<owner>/<name>" (a chart's
+// sources, a link), so the model can only name repositories already in use.
 func (w *workspace) openRepo(ctx context.Context, repo string, refs []string) (*gitrepo.Repo, map[string]string, []string, error) {
 	repo = strings.TrimSuffix(strings.Trim(strings.TrimSpace(repo), "/"), ".git")
 	if !repoPattern.MatchString(repo) || strings.Contains(repo, "..") {
@@ -160,8 +160,10 @@ func (w *workspace) openRepo(ctx context.Context, repo string, refs []string) (*
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("forge URL: %w", err)
 		}
+		// A forge may be served under a path: git.example.com/gitea/o/r.
+		root := strings.Trim(u.Host+u.Path, "/")
 		found := false
-		for _, literal := range []string{u.Host + "/" + repo, u.Host + "/" + repo + ".git"} {
+		for _, literal := range []string{root + "/" + repo, root + "/" + repo + ".git"} {
 			ok, err := w.repo.ContainsBounded(ctx, w.baseSHA, literal, repoNameChars)
 			if err != nil {
 				return nil, nil, nil, err
@@ -169,7 +171,7 @@ func (w *workspace) openRepo(ctx context.Context, repo string, refs []string) (*
 			found = found || ok
 		}
 		if !found {
-			return nil, nil, nil, fmt.Errorf("%s/%s does not appear in the repository's base branch: only repositories it references can be read", u.Host, repo)
+			return nil, nil, nil, fmt.Errorf("%s/%s does not appear in the repository's base branch: only repositories it references can be read", root, repo)
 		}
 	}
 	remote, err := w.forge.GitRemote(ctx, id)
