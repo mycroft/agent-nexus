@@ -36,7 +36,8 @@ RUN apk add --no-cache git ca-certificates \
 COPY --from=build /out/agent-nexus /usr/local/bin/agent-nexus
 USER 65532:65532
 ENV DB_PATH=/data/agent-nexus.db \
-    REPO_CACHE_DIR=/data/repos
+    REPO_CACHE_DIR=/data/repos \
+    CHART_CACHE_DIR=/data/charts
 EXPOSE 8080 8081 9090
 ENTRYPOINT ["/usr/local/bin/agent-nexus"]
 CMD ["serve"]

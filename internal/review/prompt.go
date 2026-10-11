@@ -150,7 +150,7 @@ func selectDiffs(files []*diff.File, budget int, head func(string) []byte) []cha
 	return out
 }
 
-func systemPrompt(skillBody string, repo forge.Repo, forgeName string, pr forge.PR, guidanceName, guidance string) string {
+func systemPrompt(skillBody string, repo forge.Repo, forgeName string, pr forge.PR, tools, guidanceName, guidance string) string {
 	var b strings.Builder
 	b.WriteString(skillBody)
 	fmt.Fprintf(&b, `
@@ -160,13 +160,13 @@ func systemPrompt(skillBody string, repo forge.Repo, forgeName string, pr forge.
 ## Your situation
 
 You are agent-nexus, an automated reviewer, reviewing pull request #%d of %s on %s.
-You have read-only tools over the repository at the pull request's head commit: read_file, list_dir, grep, git_log and get_file_diff. You may call several tools in one turn.
+%s You may call several tools in one turn.
 
 How to work:
 1. Read the pull request and its diff in the next message.
 2. Use the tools to confirm or drop each concern.
 3. When you are done investigating, reply in plain text with the findings you intend to report, without calling any tool. You will then be asked for the final review as JSON.
-`, pr.Number, repo, forgeName)
+`, pr.Number, repo, forgeName, tools)
 	if guidance != "" {
 		fmt.Fprintf(&b, `
 ## Repository guidance

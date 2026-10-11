@@ -27,6 +27,12 @@ type Config struct {
 	DBPath string
 	// RepoCacheDir holds one bare git repository per reviewed repo.
 	RepoCacheDir string
+	// ChartCacheDir caches the Helm chart packages and indexes the agent
+	// reads.
+	ChartCacheDir string
+	// FetchAllowedHosts are hosts the agent may read charts from even
+	// when the reviewed repository does not reference them.
+	FetchAllowedHosts []string
 	// SkillsDir, if set, replaces the embedded skills (for iterating on a
 	// skill without rebuilding).
 	SkillsDir string
@@ -81,6 +87,8 @@ func Load() (Config, error) {
 		LogLevel:            getEnv("LOG_LEVEL", "info"),
 		DBPath:              getEnv("DB_PATH", "agent-nexus.db"),
 		RepoCacheDir:        getEnv("REPO_CACHE_DIR", "repos"),
+		ChartCacheDir:       getEnv("CHART_CACHE_DIR", "charts"),
+		FetchAllowedHosts:   splitList(os.Getenv("FETCH_ALLOWED_HOSTS")),
 		SkillsDir:           os.Getenv("SKILLS_DIR"),
 		APIKeys:             os.Getenv("API_KEYS"),
 		AllowedOwners:       splitList(os.Getenv("ALLOWED_OWNERS")),

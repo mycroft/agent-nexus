@@ -206,7 +206,7 @@ func (r *Reviewer) answer(ctx context.Context, forgeName string, repoID forge.Re
 		Record:        record,
 		Logger:        r.Logger,
 	}
-	system := discussionSystemPrompt(r.DiscussionSkill.Body, repoID, forgeName, pr, ws.guidanceName, ws.guidance)
+	system := discussionSystemPrompt(r.DiscussionSkill.Body, repoID, forgeName, pr, ws.toolsSentence(), ws.guidanceName, ws.guidance)
 	findings := findingsSection(review)
 	user := discussionUserPrompt(repoID, forgeName, pr, ws, a, login, history) + findings
 	session, err := runner.Run(ctx, system, user, ws.tools())
@@ -307,7 +307,7 @@ func replyBody(a ask, text, settles string, jobID int64) string {
 	return b.String()
 }
 
-func discussionSystemPrompt(skillBody string, repo forge.Repo, forgeName string, pr forge.PR, guidanceName, guidance string) string {
+func discussionSystemPrompt(skillBody string, repo forge.Repo, forgeName string, pr forge.PR, tools, guidanceName, guidance string) string {
 	var b strings.Builder
 	b.WriteString(skillBody)
 	fmt.Fprintf(&b, `
@@ -317,9 +317,9 @@ func discussionSystemPrompt(skillBody string, repo forge.Repo, forgeName string,
 ## Your situation
 
 You are agent-nexus, an automated reviewer, answering a conversation on pull request #%d of %s on %s.
-You have read-only tools over the repository at the pull request's head commit: read_file, list_dir, grep, git_log and get_file_diff. You may call several tools in one turn.
+%s You may call several tools in one turn.
 When you are done investigating, reply in plain text without calling any tool. You will then be asked for your final answer as JSON.
-`, pr.Number, repo, forgeName)
+`, pr.Number, repo, forgeName, tools)
 	if guidance != "" {
 		fmt.Fprintf(&b, "\n## Repository guidance\n\nThe repository's %s, read from the base branch, says:\n\n<repository-guidance>\n%s\n</repository-guidance>\n", guidanceName, truncate(guidance, maxGuidance))
 	}

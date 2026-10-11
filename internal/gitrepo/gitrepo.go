@@ -280,6 +280,58 @@ func (r *Repo) Grep(ctx context.Context, rev, pattern, prefix string, ignoreCase
 	return strings.Join(lines, ""), err
 }
 
+// Contains reports whether a tracked text file at rev contains literal.
+func (r *Repo) Contains(ctx context.Context, rev, literal string) (bool, error) {
+	if err := checkSHAs(rev); err != nil {
+		return false, err
+	}
+	if literal == "" {
+		return false, errors.New("empty literal")
+	}
+	_, err := r.run(ctx, readTimeout, nil, "grep", "-q", "-I", "-F", "--no-color", "-e", literal, "--end-of-options", rev, "--")
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// DiffBlobs returns the unified diff (3 lines of context) turning a into
+// b, under the a/<label> and b/<label> names, or "" when they are equal.
+// The contents are written to temporary files with fixed names: label
+// never reaches the filesystem or git's arguments.
+func DiffBlobs(ctx context.Context, label string, a, b []byte) (string, error) {
+	dir, err := os.MkdirTemp("", "agent-nexus-diff-")
+	if err != nil {
+		return "", fmt.Errorf("diff %s: %w", label, err)
+	}
+	defer os.RemoveAll(dir)
+	pa, pb := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	if err := os.WriteFile(pa, a, 0o600); err != nil {
+		return "", fmt.Errorf("diff %s: %w", label, err)
+	}
+	if err := os.WriteFile(pb, b, 0o600); err != nil {
+		return "", fmt.Errorf("diff %s: %w", label, err)
+	}
+	out, err := execGit(ctx, readTimeout, nil, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U3", "--", pa, pb)
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		return "", nil // equal
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1, errors.Is(err, ErrTruncated):
+	default:
+		return "", err
+	}
+	text := string(out)
+	// Replace git's header, which names the temporary files.
+	if i := strings.Index(text, "\n@@"); i >= 0 {
+		text = text[i+1:]
+	} else {
+		return fmt.Sprintf("Binary files a/%s and b/%s differ\n", label, label), nil
+	}
+	return fmt.Sprintf("--- a/%s\n+++ b/%s\n%s", label, label, text), nil
+}
+
 // Log returns up to n one-line commits touching p, newest first, reachable
 // from rev.
 func (r *Repo) Log(ctx context.Context, rev, p string, n int) (string, error) {
@@ -339,12 +391,17 @@ func checkSHAs(shas ...string) error {
 // run executes git against the bare repository with an isolated
 // configuration: no system/global config, no prompts, literal pathspecs.
 func (r *Repo) run(ctx context.Context, timeout time.Duration, extraEnv []string, args ...string) ([]byte, error) {
+	return execGit(ctx, timeout, extraEnv, append([]string{"--git-dir=" + r.dir}, args...)...)
+}
+
+// execGit runs git with an isolated configuration.
+func execGit(ctx context.Context, timeout time.Duration, extraEnv []string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Arguments are fixed by this package; model input only ever arrives
 	// after --end-of-options / -e / --, or inside a validated rev:path.
-	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir=" + r.dir}, args...)...) //nolint:gosec // see comment above
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = append([]string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.TempDir(),
@@ -365,12 +422,26 @@ func (r *Repo) run(ctx context.Context, timeout time.Duration, extraEnv []string
 		if stdout.truncated && msg == "" {
 			return stdout.buf.Bytes(), ErrTruncated
 		}
-		return stdout.buf.Bytes(), fmt.Errorf("git %s: %w: %s", args[0], err, msg)
+		return stdout.buf.Bytes(), fmt.Errorf("git %s: %w: %s", subcommand(args), err, msg)
 	}
 	if stdout.truncated {
 		return stdout.buf.Bytes(), ErrTruncated
 	}
 	return stdout.buf.Bytes(), nil
+}
+
+// subcommand names the git command in args, after the global options.
+func subcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-c":
+			i++
+		case strings.HasPrefix(args[i], "-"):
+		default:
+			return args[i]
+		}
+	}
+	return "command"
 }
 
 // capped buffers up to max bytes and silently discards the rest.

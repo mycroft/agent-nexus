@@ -200,3 +200,43 @@ func TestCleanPath(t *testing.T) {
 		}
 	}
 }
+
+func TestContains(t *testing.T) {
+	repo, remote, _ := syncedRepo(t)
+	ctx := context.Background()
+	for literal, want := range map[string]bool{
+		"func main() {}":    true,
+		"const Answer":      false, // only at the head
+		"-e":                false, // a literal, never an option
+		"[a-z]+ main\\(\\)": false,
+	} {
+		got, err := repo.Contains(ctx, remote.BaseSHA, literal)
+		if err != nil || got != want {
+			t.Errorf("Contains(base, %q) = %v, %v; want %v", literal, got, err, want)
+		}
+	}
+	if got, err := repo.Contains(ctx, remote.HeadSHA, "const Answer"); err != nil || !got {
+		t.Errorf("Contains(head) = %v, %v", got, err)
+	}
+	if _, err := repo.Contains(ctx, "main", "x"); err == nil {
+		t.Error("a branch name must be rejected: revisions are SHAs")
+	}
+}
+
+func TestDiffBlobs(t *testing.T) {
+	ctx := context.Background()
+	got, err := gitrepo.DiffBlobs(ctx, "templates/../values.yaml", []byte("a: 1\nb: 2\n"), []byte("a: 1\nb: 3\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--- a/templates/../values.yaml\n+++ b/templates/../values.yaml\n@@ -1,2 +1,2 @@\n a: 1\n-b: 2\n+b: 3\n"
+	if got != want {
+		t.Errorf("DiffBlobs =\n%q\nwant\n%q", got, want)
+	}
+	if got, err := gitrepo.DiffBlobs(ctx, "x", []byte("same\n"), []byte("same\n")); err != nil || got != "" {
+		t.Errorf("equal blobs = %q, %v", got, err)
+	}
+	if got, err := gitrepo.DiffBlobs(ctx, "logo.png", []byte("\x00\x01"), []byte("\x00\x02")); err != nil || got != "Binary files a/logo.png and b/logo.png differ\n" {
+		t.Errorf("binary blobs = %q, %v", got, err)
+	}
+}

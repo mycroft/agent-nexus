@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mycroft/agent-nexus/internal/agent"
+	"github.com/mycroft/agent-nexus/internal/charts"
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
 	"github.com/mycroft/agent-nexus/internal/jobs"
@@ -115,6 +116,10 @@ type Reviewer struct {
 	MaxTurns        int
 	// ModeRules is the central review mode configuration (see resolveMode).
 	ModeRules []ModeRule
+	// Charts, if set, gives the agent the chart tools. They read the chart
+	// repositories the base branch references, and those on FetchHosts.
+	Charts     *charts.Fetcher
+	FetchHosts []string
 	// Enqueue queues a job; discussions use it to start a review asked
 	// for in a comment. Without it, such comments are answered like
 	// questions.
@@ -249,7 +254,7 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		Record:        record,
 		Logger:        r.Logger,
 	}
-	system := systemPrompt(r.Skill.Body, repoID, f.Name(), pr, ws.guidanceName, ws.guidance)
+	system := systemPrompt(r.Skill.Body, repoID, f.Name(), pr, ws.toolsSentence(), ws.guidanceName, ws.guidance)
 	user := userPrompt(repoID, f.Name(), pr, ws.baseSHA, ws.changed(ctx)) + r.earlierDiscussion(ctx, f, repoID, pr.Number)
 	session, err := runner.Run(ctx, system, user, ws.tools())
 	if err != nil {

@@ -78,6 +78,8 @@ Everything is configured through environment variables.
 | `UI_ADDR` | `:8081` | Jobs UI, unauthenticated: expose it only behind an authenticating proxy |
 | `DB_PATH` | `agent-nexus.db` | SQLite database |
 | `REPO_CACHE_DIR` | `repos` | Bare repository cache |
+| `CHART_CACHE_DIR` | `charts` | Helm chart packages and indexes read by the agent |
+| `FETCH_ALLOWED_HOSTS` | | Comma-separated hosts the agent may read charts from besides those the reviewed repository references |
 | `TRANSCRIPT_RETENTION` | `720h` | How long agent transcripts are kept |
 | `SKILLS_DIR` | embedded | Load skills from disk instead |
 | `LOG_LEVEL` | `info` | |
@@ -137,6 +139,41 @@ in the review.
 On Gitea, an approval counts toward branch protection only when the
 reviewer has write access or is in the approvals allowlist. A read-only
 bot's approvals are shown but are not "official".
+
+## Helm charts
+
+Most version-bump PRs change one line, such as
+`prometheus-community/kube-prometheus-stack: 92.3.0`. The agent can read
+the chart versions themselves:
+
+- `chart_files` lists a version's files;
+- `chart_read` reads one file;
+- `chart_diff` diffs two versions: which files changed, then their diffs,
+  `Chart.yaml` and `values.yaml` first.
+
+A review uses them to check what the repository sets against keys the new
+version renamed or removed, changed defaults and new required values.
+
+They read classic Helm repositories (`https://…`, through `index.yaml`,
+with the package digest checked) and OCI registries (`oci://…`, with an
+anonymous registry token). Subcharts shipped as archives are unpacked
+under `charts/<name>/`.
+
+The model chooses the repository URL, so a URL is accepted only if:
+
+- **it appears in the reviewed repository's base branch**, which a pull
+  request cannot change. The model can only name repositories already in
+  use, and cannot carry data out in a URL;
+- **or its host is in `FETCH_ALLOWED_HOSTS`**.
+
+Every connection, redirects included, must reach a public address, so
+neither a URL nor a redirect can reach the cluster, the local network or
+the host. No credentials are sent, and proxy settings are ignored.
+
+Packages are cached under `CHART_CACHE_DIR` for good, since a published
+version doesn't change; indexes are refreshed hourly. Sizes are capped:
+32 MB per index, 16 MB per package, and 64 MB or 5000 files once
+unpacked. Packages are read in memory, never unpacked to disk.
 
 ## Discussion
 

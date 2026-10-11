@@ -22,6 +22,7 @@ import (
 
 	"github.com/mycroft/agent-nexus/internal/agent"
 	"github.com/mycroft/agent-nexus/internal/auth"
+	"github.com/mycroft/agent-nexus/internal/charts"
 	"github.com/mycroft/agent-nexus/internal/config"
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
@@ -139,6 +140,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err != nil {
 		return nil, err
 	}
+	chartFetcher, err := charts.New(cfg.ChartCacheDir, nil)
+	if err != nil {
+		return nil, err
+	}
 	a.reviewer = &review.Reviewer{
 		Forges:          byName,
 		Repos:           repos,
@@ -149,6 +154,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		ContextTokens:   contextTokens,
 		MaxTurns:        cfg.AgentMaxTurns,
 		ModeRules:       modeRules,
+		Charts:          chartFetcher,
+		FetchHosts:      cfg.FetchAllowedHosts,
 		Logger:          log,
 	}
 	return a, nil

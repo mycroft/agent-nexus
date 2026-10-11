@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
+	"github.com/mycroft/agent-nexus/internal/charts"
 	"github.com/mycroft/agent-nexus/internal/diff"
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
@@ -23,6 +26,8 @@ type workspace struct {
 	guidanceName  string
 	guidance      string
 	contextTokens int
+	charts        *charts.Fetcher
+	fetchHosts    []string
 }
 
 // prepare fetches the pull request at headSHA and computes its diff. It
@@ -56,7 +61,10 @@ func (r *Reviewer) prepare(ctx context.Context, f forge.Forge, repoID forge.Repo
 		return nil, "", fmt.Errorf("parse diff: %w", err)
 	}
 
-	w := &workspace{repo: repo, baseSHA: baseSHA, headSHA: headSHA, files: files, byPath: map[string]*diff.File{}, contextTokens: r.ContextTokens}
+	w := &workspace{
+		repo: repo, baseSHA: baseSHA, headSHA: headSHA, files: files, byPath: map[string]*diff.File{},
+		contextTokens: r.ContextTokens, charts: r.Charts, fetchHosts: r.FetchHosts,
+	}
 	for _, file := range files {
 		w.byPath[file.Path()] = file
 		if file.Status == diff.Renamed {
@@ -85,7 +93,42 @@ func (w *workspace) fileDiff(path string) (string, bool) {
 }
 
 func (w *workspace) tools() []tools.Tool {
-	return tools.Repo(w.repo, w.headSHA, w.fileDiff)
+	out := tools.Repo(w.repo, w.headSHA, w.fileDiff)
+	if w.charts != nil {
+		out = append(out, tools.Charts(w.charts, w.chartPolicy)...)
+	}
+	return out
+}
+
+// toolsSentence tells the model which tools it has.
+func (w *workspace) toolsSentence() string {
+	s := "You have read-only tools over the repository at the pull request's head commit: read_file, list_dir, grep, git_log and get_file_diff."
+	if w.charts != nil {
+		s += " chart_files, chart_read and chart_diff read published Helm chart versions, from the chart repositories the repository's base branch references."
+	}
+	return s
+}
+
+// chartPolicy admits a chart repository URL that appears in the base
+// commit, which a pull request cannot change, or whose host is on
+// fetchHosts. The model can then only name repositories already in use,
+// and cannot smuggle data out in a URL.
+func (w *workspace) chartPolicy(ctx context.Context, repoURL string) error {
+	norm, host, err := charts.NormalizeRepoURL(repoURL)
+	if err != nil {
+		return err
+	}
+	if slices.ContainsFunc(w.fetchHosts, func(h string) bool { return strings.EqualFold(h, host) }) {
+		return nil
+	}
+	found, err := w.repo.Contains(ctx, w.baseSHA, norm)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%s does not appear in the repository's base branch, and %s is not an allowed host: only chart repositories the repository already uses can be read", norm, host)
+	}
+	return nil
 }
 
 // changed lists the changed files, with the diffs that fit the prompt's
