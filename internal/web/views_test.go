@@ -115,6 +115,11 @@ func TestFormatters(t *testing.T) {
 			t.Errorf("ago(%s) = %q, want %q", d, got, want)
 		}
 	}
+	for s, want := range map[string]string{"one": "1 line", "a\nb": "2 lines"} {
+		if got := countLines(s); got != want {
+			t.Errorf("countLines(%q) = %q, want %q", s, got, want)
+		}
+	}
 	version := funcs["displayVersion"].(func(string) string)
 	for in, want := range map[string]string{"": "dev", "dev": "dev", "0.1.4": "v0.1.4", "v0.1.4": "v0.1.4"} {
 		if got := version(in); got != want {

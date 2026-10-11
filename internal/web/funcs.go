@@ -72,13 +72,22 @@ var funcs = template.FuncMap{
 		return sha
 	},
 	"timestamp": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04:05 UTC") },
-	"lines":     func(s string) int { return strings.Count(s, "\n") + 1 },
+	"lines":     countLines,
 	"displayVersion": func(v string) string {
 		if v == "" || v == "dev" {
 			return "dev"
 		}
 		return "v" + strings.TrimPrefix(v, "v")
 	},
+}
+
+// countLines says how many lines s has: "1 line", "12 lines".
+func countLines(s string) string {
+	n := strings.Count(s, "\n") + 1
+	if n == 1 {
+		return "1 line"
+	}
+	return strconv.Itoa(n) + " lines"
 }
 
 // ago formats the time since t: "12s", "5m", "3h", "2d".
