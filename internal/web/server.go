@@ -148,7 +148,7 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("seen") != l.Seen {
-		w.Header().Set("HX-Trigger", "jobs-changed")
+		w.Header().Set("Hx-Trigger", "jobs-changed")
 	}
 	s.render(w, http.StatusOK, "live", l)
 }

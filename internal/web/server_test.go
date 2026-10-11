@@ -138,14 +138,14 @@ func TestLiveSignalsChanges(t *testing.T) {
 	seen := fmt.Sprintf("%d:running,%d:queued", running, queued)
 
 	res, body := get(t, h, "/fragments/live?seen=")
-	if res.Header.Get("HX-Trigger") != "jobs-changed" {
-		t.Errorf("HX-Trigger = %q, want jobs-changed after a change", res.Header.Get("HX-Trigger"))
+	if res.Header.Get("Hx-Trigger") != "jobs-changed" {
+		t.Errorf("HX-Trigger = %q, want jobs-changed after a change", res.Header.Get("Hx-Trigger"))
 	}
 	assertContains(t, body, `<section id="live"`, "seen="+seen)
 	assertLacks(t, body, "<html")
 
 	res, _ = get(t, h, "/fragments/live?seen="+seen)
-	if got := res.Header.Get("HX-Trigger"); got != "" {
+	if got := res.Header.Get("Hx-Trigger"); got != "" {
 		t.Errorf("HX-Trigger = %q, want none while nothing changed", got)
 	}
 }
