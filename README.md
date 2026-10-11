@@ -36,6 +36,8 @@ workflow ──POST /v1/events/pr-review──▶ API (API key, owner allowlist,
 - **Comment or verdict, per repository.** By default a review is a plain
   comment. Repositories in verdict mode get an approval, a comment or a
   change request instead (see [Review modes](#review-modes)).
+- **A jobs UI.** It shows what runs, the job history, and every step the
+  agent took (see [Jobs UI](#jobs-ui)).
 
 The review instructions live in [`skills/pr-review/SKILL.md`](skills/pr-review/SKILL.md),
 which uses the Agent Skills format and is embedded in the binary.
@@ -309,6 +311,12 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
 
 Both pages refresh themselves with htmx while jobs run. The theme follows
 the OS until toggled.
+
+![The jobs page: a running review, the queued jobs and the history](docs/screenshots/jobs.png)
+
+![A job page in dark mode: a review reading the values a repository overrides and diffing the chart versions of a bump](docs/screenshots/job.png)
+
+The screenshots use demo data.
 
 The UI has no authentication of its own, which is why it has its own
 listener: route it through an authenticating proxy (an Authentik outpost,
