@@ -194,6 +194,29 @@ What the model may ask for is limited the same way:
   `prometheus-community.github.io`. Otherwise, it must be on
   `FETCH_ALLOWED_HOSTS`. Query strings are refused.
 
+### Other repositories of the forge
+
+Self-built images and charts usually have no public release notes. Their
+source is another repository on the same forge, often private.
+
+- **`repo_log(repo, from, to)`** lists that repository's commits between
+  two tags or branches, with their messages and a diffstat. `0.1.6` also
+  matches the tag `v0.1.6`.
+- **`repo_read(repo, ref, path)`** reads one of its files at a tag or
+  branch.
+
+They fetch through the git cache with the forge's own credentials, the
+ones agent-nexus already uses to review, so no new token is involved:
+
+- **Gitea** uses the bot's token. The bot reads only what its account
+  may read, so add it as a read collaborator where needed.
+- **GitHub** uses the App's installation token, which only covers the
+  repositories where the App is installed.
+
+The repository must be the one under review, or appear in its base
+branch as `<forge host>/<owner>/<name>`, for example a chart's `sources`
+or a clone URL. The name is matched as a whole token.
+
 ### Network safety
 
 Every connection, redirects included, must reach a public address, so

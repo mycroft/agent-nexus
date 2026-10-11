@@ -37,6 +37,7 @@ The flow is event → job → handler → agent → forge.
 - **Remote tools:**
   - `tools.Charts` exposes `chart_files`, `chart_read` and `chart_diff`; the diff uses `gitrepo.DiffBlobs`.
   - `tools.Web` exposes `fetch_url` and `release_notes`.
+  - `tools.Repos` exposes `repo_log` and `repo_read`, over other repositories of the forge. They go through `gitrepo.Cache.FetchRefs` and the forge's `GitRemote` credentials, not through `internal/remote`; `workspace.openRepo` is their policy.
   - `workspace.chartPolicy`, `pagePolicy` and `imagePolicy` decide what the model may name.
 - **`internal/web`:** the read-only jobs UI on `UI_ADDR` (htmx + Tailwind v4, templates and assets embedded). The main page polls `/fragments/live`, which sets `HX-Trigger: jobs-changed` when the running and queued jobs differ from `?seen=`, and the history reloads on that event. A job page polls `/fragments/jobs/{id}/steps?after=<seq>` while the job is unfinished. Tailwind scans `templates/` and `*.go`, so class names in Go maps (`funcs.go`) must be complete literals.
 - **`skills/`:** Agent Skills (`<name>/SKILL.md`, frontmatter `name` and `description` only), embedded via `skills/embed.go`.
@@ -52,6 +53,7 @@ The flow is event → job → handler → agent → forge.
   - A chart repository URL must appear verbatim in the base commit (`Repo.Contains`).
   - A page host or an image name must appear there as a whole token (`Repo.ContainsBounded`); pages take no query string.
   - Otherwise, the host must be on `FETCH_ALLOWED_HOSTS`.
+  - Another repository of the forge must be the reviewed one, or appear in the base commit as `<forge host>/<owner>/<name>` (`openRepo`). It is read with the forge's credentials only: never add credentials for other hosts to agent-nexus. Those belong in a proxy or an MCP server outside it.
   - Every connection goes through `remote.NewHTTPClient`, which refuses non-public addresses at dial time, redirects included.
   - Never send credentials to these hosts, and never give the agent a fetcher without these guards.
 - **The UI has no authentication.** It only reads the store and runs on its own listener, so the deployment puts it behind an authenticating proxy while the API ingress stays reachable with API keys. Keep it read-only, and keep the CSP (`default-src 'self'`, htmx with `allowEval: false`): no inline scripts or styles.

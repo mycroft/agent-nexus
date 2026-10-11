@@ -275,3 +275,47 @@ func TestContainsBounded(t *testing.T) {
 		t.Error("a literal with regexp syntax must be refused")
 	}
 }
+
+func TestFetchRefs(t *testing.T) {
+	remote := gitrepotest.New(t, 1,
+		map[string]string{"app.go": "v1\n", "CHANGELOG.md": "# 1.0.0\n"},
+		map[string]string{"app.go": "v2\n", "CHANGELOG.md": "# 1.1.0\n"})
+	// The head commit becomes a release on main, as after a merge.
+	gitrepotest.Git(t, remote.Dir, "update-ref", "refs/heads/main", remote.HeadSHA)
+	gitrepotest.Git(t, remote.Dir, "tag", "v1.0.0", remote.BaseSHA)
+	gitrepotest.Git(t, remote.Dir, "tag", "-a", "-m", "release", "v1.1.0", remote.HeadSHA)
+	cache, err := gitrepo.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	r := gitrepo.Remote{Key: "test/o/app", URL: remote.Dir}
+
+	repo, commits, tags, err := cache.FetchRefs(ctx, r, []string{"v1.0.0", "v1.1.0", "main", "v9.9.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An annotated tag resolves to its commit; a missing name is left out.
+	if commits["v1.0.0"] != remote.BaseSHA || commits["v1.1.0"] != remote.HeadSHA || commits["main"] != remote.HeadSHA || len(commits) != 3 {
+		t.Errorf("commits = %v", commits)
+	}
+	if strings.Join(tags, ",") != "v1.0.0,v1.1.0" {
+		t.Errorf("tags = %v", tags)
+	}
+	log, err := repo.LogRange(ctx, commits["v1.0.0"], commits["v1.1.0"], 10)
+	if err != nil || !strings.HasPrefix(log, remote.HeadSHA[:7]+" ") || !strings.Contains(log, " test: change\n") {
+		t.Errorf("LogRange = %q, %v", log, err)
+	}
+	stat, err := repo.DiffStat(ctx, commits["v1.0.0"], commits["v1.1.0"])
+	if err != nil || !strings.Contains(stat, "CHANGELOG.md") || !strings.Contains(stat, "2 files changed") {
+		t.Errorf("DiffStat = %q, %v", stat, err)
+	}
+	if content, err := repo.ReadFile(ctx, commits["v1.1.0"], "CHANGELOG.md"); err != nil || string(content) != "# 1.1.0\n" {
+		t.Errorf("ReadFile = %q, %v", content, err)
+	}
+	for _, bad := range []string{"-upload-pack=x", "a..b", "x.lock", "a b"} {
+		if _, _, _, err := cache.FetchRefs(ctx, r, []string{bad}); err == nil {
+			t.Errorf("FetchRefs(%q) accepted", bad)
+		}
+	}
+}

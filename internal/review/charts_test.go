@@ -90,7 +90,12 @@ func TestToolsWithoutCharts(t *testing.T) {
 	if _, _, err := f.reviewer.Draft(context.Background(), f.req, 1, nil); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(f.llm.requests[0].Messages[0].Content, "read published Helm chart versions") || len(f.llm.requests[0].Tools) != 5 {
-		t.Error("chart tools offered without a fetcher")
+	if strings.Contains(f.llm.requests[0].Messages[0].Content, "read published Helm chart versions") {
+		t.Error("the system prompt mentions chart tools without a fetcher")
+	}
+	for _, tool := range f.llm.requests[0].Tools {
+		if strings.HasPrefix(tool.Name, "chart_") {
+			t.Errorf("%s offered without a fetcher", tool.Name)
+		}
 	}
 }

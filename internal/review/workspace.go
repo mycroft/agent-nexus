@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -30,6 +32,11 @@ type workspace struct {
 	charts        *charts.Fetcher
 	remote        *remote.Client
 	fetchHosts    []string
+	// forge, repos and repoID let the agent read other repositories of
+	// the forge, with the forge's own credentials.
+	forge  forge.Forge
+	repos  *gitrepo.Cache
+	repoID forge.Repo
 }
 
 // prepare fetches the pull request at headSHA and computes its diff. It
@@ -72,6 +79,7 @@ func (r *Reviewer) prepare(ctx context.Context, f forge.Forge, repoID forge.Repo
 	w := &workspace{
 		repo: repo, baseSHA: baseSHA, headSHA: headSHA, files: files, byPath: map[string]*diff.File{},
 		contextTokens: r.ContextTokens, charts: r.Charts, remote: r.Remote, fetchHosts: r.FetchHosts,
+		forge: f, repos: r.Repos, repoID: repoID,
 	}
 	for _, file := range files {
 		w.byPath[file.Path()] = file
@@ -108,6 +116,9 @@ func (w *workspace) tools() []tools.Tool {
 	if w.remote != nil {
 		out = append(out, tools.Web(w.remote, tools.WebPolicy{Page: w.pagePolicy, Image: w.imagePolicy})...)
 	}
+	if w.forge != nil && w.repos != nil {
+		out = append(out, tools.Repos(w.openRepo)...)
+	}
 	return out
 }
 
@@ -120,7 +131,52 @@ func (w *workspace) toolsSentence() string {
 	if w.remote != nil {
 		s += " fetch_url reads documentation pages on hosts the base branch references, and release_notes the GitHub release notes of a container image it references."
 	}
+	if w.forge != nil && w.repos != nil {
+		s += " repo_log and repo_read read other repositories of this forge that the base branch references, such as the source of a self-built image or chart."
+	}
 	return s
+}
+
+// repoNameChars are those of an owner or repository name: the class
+// around "git.example.com/owner/name" in the base commit.
+const repoNameChars = "A-Za-z0-9._-"
+
+var repoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+
+// openRepo fetches the given tags or branches of another repository of the
+// forge, with the forge's credentials: the bot reads what it may read on
+// the forge. The repository must be the one under review, or appear in
+// the base commit as "<forge host>/<owner>/<name>" (a chart's sources, a
+// link), so the model can only name repositories already in use.
+func (w *workspace) openRepo(ctx context.Context, repo string, refs []string) (*gitrepo.Repo, map[string]string, []string, error) {
+	repo = strings.TrimSuffix(strings.Trim(strings.TrimSpace(repo), "/"), ".git")
+	if !repoPattern.MatchString(repo) || strings.Contains(repo, "..") {
+		return nil, nil, nil, fmt.Errorf("invalid repository %q: want owner/name", repo)
+	}
+	owner, name, _ := strings.Cut(repo, "/")
+	id := forge.Repo{Owner: owner, Name: name}
+	if !strings.EqualFold(id.String(), w.repoID.String()) {
+		u, err := url.Parse(w.forge.ServerURL())
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("forge URL: %w", err)
+		}
+		found := false
+		for _, literal := range []string{u.Host + "/" + repo, u.Host + "/" + repo + ".git"} {
+			ok, err := w.repo.ContainsBounded(ctx, w.baseSHA, literal, repoNameChars)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			found = found || ok
+		}
+		if !found {
+			return nil, nil, nil, fmt.Errorf("%s/%s does not appear in the repository's base branch: only repositories it references can be read", u.Host, repo)
+		}
+	}
+	remote, err := w.forge.GitRemote(ctx, id)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return w.repos.FetchRefs(ctx, remote, refs)
 }
 
 // Character classes around a hostname or an image name in the base

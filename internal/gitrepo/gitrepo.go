@@ -93,24 +93,11 @@ func (c *Cache) Sync(ctx context.Context, remote Remote, baseBranch string, pr i
 	lock.Lock()
 	defer lock.Unlock()
 
-	repo := &Repo{dir: dir}
-	if _, err := os.Stat(filepath.Join(dir, "HEAD")); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return nil, fmt.Errorf("create repo dir: %w", err)
-		}
-		if _, err := repo.run(ctx, readTimeout, nil, "init", "--bare", "--quiet"); err != nil {
-			return nil, err
-		}
+	repo, err := openBare(ctx, dir)
+	if err != nil {
+		return nil, err
 	}
-
-	var env []string
-	if remote.AuthHeader != "" {
-		env = []string{
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
-			"GIT_CONFIG_VALUE_0=Authorization: " + remote.AuthHeader,
-		}
-	}
+	env := remote.authEnv()
 	args := []string{
 		"fetch", "--quiet", "--no-tags", "--force", "--no-write-fetch-head",
 		"--end-of-options", remote.URL,
@@ -121,6 +108,102 @@ func (c *Cache) Sync(ctx context.Context, remote Remote, baseBranch string, pr i
 		return nil, fmt.Errorf("fetch %s: %w", remote.Key, err)
 	}
 	return repo, nil
+}
+
+// FetchRefs fetches the tags and branches of remote with the given names
+// into its cached bare repository, and returns the repository, the commit
+// of each name found, and the remote's tag names (to help when a name is
+// missing). A name found both as a tag and as a branch is the tag.
+func (c *Cache) FetchRefs(ctx context.Context, remote Remote, names []string) (*Repo, map[string]string, []string, error) {
+	dir, err := c.repoDir(remote.Key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, n := range names {
+		if !refName.MatchString(n) || strings.Contains(n, "..") || strings.HasSuffix(n, ".lock") {
+			return nil, nil, nil, fmt.Errorf("invalid tag or branch name %q", n)
+		}
+	}
+	lock := c.lock(remote.Key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	repo, err := openBare(ctx, dir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	env := remote.authEnv()
+	out, err := repo.run(ctx, fetchTimeout, env, "ls-remote", "--quiet", "--refs", "--tags", "--heads", "--end-of-options", remote.URL)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("list refs of %s: %w", remote.Key, err)
+	}
+	tags, branches := map[string]bool{}, map[string]bool{}
+	var tagNames []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		_, ref, _ := strings.Cut(line, "\t")
+		if t, ok := strings.CutPrefix(ref, "refs/tags/"); ok {
+			tags[t] = true
+			tagNames = append(tagNames, t)
+		} else if b, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+			branches[b] = true
+		}
+	}
+	local := map[string]string{}
+	args := []string{"fetch", "--quiet", "--no-tags", "--force", "--no-write-fetch-head", "--end-of-options", remote.URL}
+	for _, n := range names {
+		switch {
+		case tags[n]:
+			local[n] = "refs/tags/" + n
+			args = append(args, "+refs/tags/"+n+":refs/tags/"+n)
+		case branches[n]:
+			local[n] = "refs/remotes/origin/" + n
+			args = append(args, "+refs/heads/"+n+":refs/remotes/origin/"+n)
+		}
+	}
+	if len(local) > 0 {
+		if _, err := repo.run(ctx, fetchTimeout, env, args...); err != nil {
+			return nil, nil, nil, fmt.Errorf("fetch %s: %w", remote.Key, err)
+		}
+	}
+	commits := map[string]string{}
+	for n, ref := range local {
+		sha, err := repo.run(ctx, readTimeout, nil, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("resolve %s: %w", n, err)
+		}
+		commits[n] = strings.TrimSpace(string(sha))
+	}
+	return repo, commits, tagNames, nil
+}
+
+// refName is a tag or branch name FetchRefs accepts.
+var refName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$`)
+
+// openBare opens the bare repository at dir, creating it on first use.
+func openBare(ctx context.Context, dir string) (*Repo, error) {
+	repo := &Repo{dir: dir}
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return nil, fmt.Errorf("create repo dir: %w", err)
+		}
+		if _, err := repo.run(ctx, readTimeout, nil, "init", "--bare", "--quiet"); err != nil {
+			return nil, err
+		}
+	}
+	return repo, nil
+}
+
+// authEnv passes the remote's credentials to git as an extra HTTP header,
+// so they never appear in a URL or the repository config.
+func (r Remote) authEnv() []string {
+	if r.AuthHeader == "" {
+		return nil
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: " + r.AuthHeader,
+	}
 }
 
 func (c *Cache) repoDir(key string) (string, error) {
@@ -355,6 +438,26 @@ func DiffBlobs(ctx context.Context, label string, a, b []byte) (string, error) {
 		return fmt.Sprintf("Binary files a/%s and b/%s differ\n", label, label), nil
 	}
 	return fmt.Sprintf("--- a/%s\n+++ b/%s\n%s", label, label, text), nil
+}
+
+// LogRange returns up to n commits reachable from to but not from, newest
+// first, with their messages.
+func (r *Repo) LogRange(ctx context.Context, from, to string, n int) (string, error) {
+	if err := checkSHAs(from, to); err != nil {
+		return "", err
+	}
+	out, err := r.run(ctx, readTimeout, nil, "log", "--no-color", "--date=short", "--format=%h %ad %an: %s%n%w(0,4,4)%b",
+		"-n", strconv.Itoa(n), "--end-of-options", from+".."+to, "--")
+	return string(out), err
+}
+
+// DiffStat summarizes the files changed between two commits.
+func (r *Repo) DiffStat(ctx context.Context, from, to string) (string, error) {
+	if err := checkSHAs(from, to); err != nil {
+		return "", err
+	}
+	out, err := r.run(ctx, readTimeout, nil, "diff", "--no-color", "--no-ext-diff", "--stat=120", "--end-of-options", from, to, "--")
+	return string(out), err
 }
 
 // Log returns up to n one-line commits touching p, newest first, reachable

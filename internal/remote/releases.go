@@ -95,6 +95,11 @@ func versionKey(s string) []int {
 
 func isPrerelease(s string) bool { return preRelease.MatchString(s) }
 
+// SortVersions orders tags newest version first, as Releases compares them.
+func SortVersions(tags []string) {
+	slices.SortStableFunc(tags, func(a, b string) int { return compareVersions(versionKey(b), versionKey(a)) })
+}
+
 // compareVersions compares number lists, missing numbers counting as 0.
 func compareVersions(a, b []int) int {
 	for i := range max(len(a), len(b)) {

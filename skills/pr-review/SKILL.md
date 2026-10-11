@@ -27,6 +27,7 @@ The diff shows only the changed lines. Before claiming anything about code outsi
 
   `chart_read` reads one file of a version, such as its upgrade notes or `values.yaml`.
 - **Image versions** — when the change moves a container image to another tag, and you have `release_notes`, read the releases between the old and new tag. Look for breaking changes, removed or renamed settings, and required migrations, then check them against how the repository configures the image.
+- **Self-built images and charts** — when the image or chart comes from a repository on this forge (a chart's `sources`, a link in the repository), `repo_log` lists its commits between the two versions' tags, and `repo_read` reads a file at a tag, such as its CHANGELOG. Use them where `release_notes` has nothing.
 - **Documentation** — `fetch_url` reads an upgrade guide or changelog on a site the repository already references, such as a link in a chart's README or a release note. Read it when a release note points to it.
 
 Stop investigating once each candidate finding is confirmed or dropped. Do not explore unrelated code.
