@@ -119,52 +119,130 @@ func TestRunStopsAtTurnLimit(t *testing.T) {
 	}
 }
 
-func TestFinishRetriesInvalidAnswer(t *testing.T) {
+func okValidator(raw []byte) error {
+	var v struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	if !v.OK {
+		return errors.New("not ok")
+	}
+	return nil
+}
+
+var okSchema = llm.JSONSchema{Name: "x", Schema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}}}`)}
+
+// The final answer is asked like the tool loop's turns (same tools, no
+// grammar, no template options), so llama-server reuses its prompt cache.
+func TestFinishAsksLikeTheToolLoop(t *testing.T) {
 	fake := &script{replies: []func(llm.Request) (llm.Completion, error){
+		reply("", call("echo", `{"text":"x"}`)),
 		reply("ready"),
-		reply(`{"ok": false}`),
+		reply("Here it is:\n```json\n{\"ok\": false}\n```"),
 		reply(`{"ok": true}`),
 	}}
 	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 5}
-	s, err := r.Run(context.Background(), "sys", "user", nil)
+	s, err := r.Run(context.Background(), "sys", "user", []tools.Tool{echo})
 	if err != nil {
 		t.Fatal(err)
 	}
-	validate := func(raw []byte) error {
-		var v struct {
-			OK bool `json:"ok"`
-		}
-		if err := json.Unmarshal(raw, &v); err != nil {
-			return err
-		}
-		if !v.OK {
-			return errors.New("not ok")
-		}
-		return nil
-	}
-	if err := s.Finish(context.Background(), "answer", llm.JSONSchema{Name: "x", Schema: json.RawMessage(`{}`)}, validate); err != nil {
+	if err := s.Finish(context.Background(), "answer", okSchema, okValidator); err != nil {
 		t.Fatal(err)
 	}
-	final := fake.requests[2]
-	if final.Schema == nil || !final.DisableThinking || len(final.Tools) != 0 {
-		t.Errorf("final request = %+v", final)
+	loop, final := fake.requests[1], fake.requests[2]
+	if final.Schema != nil || final.DisableThinking || len(final.Tools) != len(loop.Tools) || len(final.Tools) != 1 {
+		t.Errorf("final request = %+v, want the tool loop's shape", final)
 	}
-	last := final.Messages[len(final.Messages)-1]
-	if !strings.Contains(last.Content, "not ok") {
-		t.Errorf("retry message does not carry the validation error: %q", last.Content)
+	ask := final.Messages[len(final.Messages)-1].Content
+	if !strings.HasPrefix(ask, "answer\n\nReply with only a JSON object") || !strings.Contains(ask, `"ok":{"type":"boolean"}`) {
+		t.Errorf("final instruction = %q", ask)
+	}
+	retry := fake.requests[3].Messages[len(fake.requests[3].Messages)-1].Content
+	if !strings.Contains(retry, "not ok") || fake.requests[3].Schema != nil {
+		t.Errorf("retry = %q (schema %v)", retry, fake.requests[3].Schema)
 	}
 }
 
-func TestFinishFailsAfterTwoInvalidAnswers(t *testing.T) {
-	fake := &script{replies: []func(llm.Request) (llm.Completion, error){reply("ready"), reply("x"), reply("y")}}
+// Asked for its answer, a model may still call a tool: the call is
+// refused, not run, since a new result invites more investigation.
+func TestFinishRefusesToolsCalledAtTheEnd(t *testing.T) {
+	runs := 0
+	counted := tools.Tool{
+		Name:       "read",
+		Parameters: json.RawMessage(`{"type":"object"}`),
+		Run: func(context.Context, json.RawMessage) (string, error) {
+			runs++
+			return "content", nil
+		},
+	}
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){
+		reply("ready"),
+		reply("", call("read", `{"path":"late"}`)),
+		reply(`{"ok": true}`),
+	}}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 5}
+	s, err := r.Run(context.Background(), "sys", "user", []tools.Tool{counted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Finish(context.Background(), "answer", okSchema, okValidator); err != nil {
+		t.Fatal(err)
+	}
+	msgs := fake.requests[2].Messages
+	refusal, retry := msgs[len(msgs)-2], msgs[len(msgs)-1]
+	if runs != 0 || refusal.Role != "tool" || !strings.HasPrefix(refusal.Content, "The investigation is over") || !strings.Contains(retry.Content, "called a tool") {
+		t.Errorf("runs = %d, late tool call answered with %+v", runs, msgs[len(msgs)-2:])
+	}
+}
+
+func TestFinishFallsBackToSchema(t *testing.T) {
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){reply("ready"), reply("x"), reply("y"), reply("z"), reply(`{"ok": true}`)}}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 5}
+	s, err := r.Run(context.Background(), "sys", "user", []tools.Tool{echo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Finish(context.Background(), "answer", okSchema, okValidator); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= finishAttempts; i++ {
+		if fake.requests[i].Schema != nil {
+			t.Errorf("attempt %d used the schema before the fallback", i)
+		}
+	}
+	last := fake.requests[finishAttempts+1]
+	if last.Schema == nil || !last.DisableThinking || len(last.Tools) != 0 {
+		t.Errorf("fallback request = %+v", last)
+	}
+}
+
+func TestFinishFailsAfterFallback(t *testing.T) {
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){reply("ready"), reply("x"), reply("y"), reply("z"), reply("w")}}
 	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 5}
 	s, err := r.Run(context.Background(), "sys", "user", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.Finish(context.Background(), "answer", llm.JSONSchema{Name: "x"}, func([]byte) error { return errors.New("bad") })
-	if err == nil {
+	if err := s.Finish(context.Background(), "answer", okSchema, func([]byte) error { return errors.New("bad") }); err == nil {
 		t.Fatal("Finish accepted invalid answers")
+	}
+	if want := 1 + finishAttempts + 1; len(fake.requests) != want {
+		t.Errorf("requests = %d, want %d (loop, answers, fallback)", len(fake.requests), want)
+	}
+}
+
+func TestExtractJSON(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"a":1}`:                         `{"a":1}`,
+		"```json\n{\"a\":{\"b\":2}}\n```": `{"a":{"b":2}}`,
+		"Sure: {\"a\":1} done":            `{"a":1}`,
+		" no json ":                       "no json",
+	} {
+		if got := extractJSON(in); got != want {
+			t.Errorf("extractJSON(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -180,7 +258,7 @@ func TestElidesOldToolOutput(t *testing.T) {
 	}
 	var replies []func(llm.Request) (llm.Completion, error)
 	for i := range 5 {
-		replies = append(replies, reply("", llm.ToolCall{ID: strconv.Itoa(i), Function: llm.FunctionCall{Name: "big", Arguments: "{}"}}))
+		replies = append(replies, reply("", llm.ToolCall{ID: strconv.Itoa(i), Function: llm.FunctionCall{Name: "big", Arguments: fmt.Sprintf(`{"n":%d}`, i)}}))
 	}
 	replies = append(replies, reply("done"))
 	fake := &script{replies: replies}
@@ -217,9 +295,9 @@ func TestRetriesAfterContextExceeded(t *testing.T) {
 		return llm.Completion{}, fmt.Errorf("wrapped: %w", llm.ErrContextExceeded)
 	}
 	fake := &script{replies: []func(llm.Request) (llm.Completion, error){
-		reply("", llm.ToolCall{ID: "a", Function: llm.FunctionCall{Name: "big", Arguments: "{}"}}),
-		reply("", llm.ToolCall{ID: "b", Function: llm.FunctionCall{Name: "big", Arguments: "{}"}}),
-		reply("", llm.ToolCall{ID: "c", Function: llm.FunctionCall{Name: "big", Arguments: "{}"}}),
+		reply("", llm.ToolCall{ID: "a", Function: llm.FunctionCall{Name: "big", Arguments: `{"n":1}`}}),
+		reply("", llm.ToolCall{ID: "b", Function: llm.FunctionCall{Name: "big", Arguments: `{"n":2}`}}),
+		reply("", llm.ToolCall{ID: "c", Function: llm.FunctionCall{Name: "big", Arguments: `{"n":3}`}}),
 		exceeded,
 		reply("done"),
 	}}
@@ -230,5 +308,62 @@ func TestRetriesAfterContextExceeded(t *testing.T) {
 	}
 	if s.Turns != 4 {
 		t.Errorf("turns = %d, want 4", s.Turns)
+	}
+}
+
+// A model repeating the same call (at temperature 0 the same conversation
+// repeats itself) is pointed at the output it already has, and two turns
+// of repeats end the investigation.
+func TestRunStopsRepeatedCalls(t *testing.T) {
+	runs := 0
+	counted := tools.Tool{
+		Name:       "read",
+		Parameters: json.RawMessage(`{"type":"object"}`),
+		Run: func(context.Context, json.RawMessage) (string, error) {
+			runs++
+			return "content", nil
+		},
+	}
+	same := func(args string) func(llm.Request) (llm.Completion, error) {
+		return reply("", call("read", args))
+	}
+	fake := &script{replies: []func(llm.Request) (llm.Completion, error){
+		same(`{"path":"a","line":1}`),
+		same(`{"line": 1, "path": "a"}`), // same call, other key order
+		same(`{"path":"b"}`),             // a new call resets the count
+		same(`{"path":"a","line":1}`),
+		same(`{"path":"b"}`),
+		same(`{"path":"c"}`),
+	}}
+	r := &Runner{LLM: fake, ContextTokens: 100000, MaxTurns: 10}
+	s, err := r.Run(context.Background(), "sys", "user", []tools.Tool{counted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Turns != 5 || !s.TurnLimitReached || runs != 2 {
+		t.Errorf("turns = %d, cut short = %v, tool runs = %d; want 5, true, 2", s.Turns, s.TurnLimitReached, runs)
+	}
+	last := s.Messages[len(s.Messages)-1]
+	if last.Role != "tool" || !strings.HasPrefix(last.Content, "You already called read") {
+		t.Errorf("repeat answered with %q", last.Content)
+	}
+}
+
+func TestRepeatAfterElisionRuns(t *testing.T) {
+	runs := 0
+	counted := tools.Tool{
+		Name:       "read",
+		Parameters: json.RawMessage(`{"type":"object"}`),
+		Run: func(context.Context, json.RawMessage) (string, error) {
+			runs++
+			return "content", nil
+		},
+	}
+	s := &Session{r: &Runner{}, tools: map[string]tools.Tool{"read": counted}, calls: map[string]int{}}
+	msg := llm.Message{ToolCalls: []llm.ToolCall{call("read", `{"path":"a"}`)}}
+	s.runTools(context.Background(), msg)
+	s.Messages[len(s.Messages)-1].Content = elidedNotice
+	if s.runTools(context.Background(), msg) || runs != 2 {
+		t.Errorf("a call whose output was elided must run again (runs = %d)", runs)
 	}
 }

@@ -24,6 +24,13 @@ const (
 	// Budget thresholds as fractions of the context window.
 	elideAbove = 0.75
 	elideTo    = 0.55
+	// finishAttempts is how many times the final answer is asked in the
+	// cache-friendly form before the schema-constrained fallback.
+	finishAttempts = 3
+	// maxRepeatTurns ends the investigation after this many consecutive
+	// turns whose tool calls all repeat earlier ones: at temperature 0 the
+	// same conversation keeps producing the same turn.
+	maxRepeatTurns = 2
 )
 
 // Completer is the subset of *llm.Client the loop needs.
@@ -69,10 +76,16 @@ type Session struct {
 	PeakPromptTokens int
 	// Turns is the number of LLM calls made by Run.
 	Turns int
-	// TurnLimitReached is set when Run stopped at MaxTurns.
+	// TurnLimitReached is set when Run cut the investigation short: at
+	// MaxTurns, or because the model kept repeating its tool calls.
 	TurnLimitReached bool
 
 	charsPerToken float64
+	// calls maps a tool call (name and canonical arguments) to the index
+	// of its result in Messages.
+	calls map[string]int
+	// repeatTurns counts consecutive turns made only of repeated calls.
+	repeatTurns int
 }
 
 // Run starts a conversation and loops until the model answers without
@@ -83,6 +96,7 @@ func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.T
 		r:             r,
 		tools:         map[string]tools.Tool{},
 		charsPerToken: 3,
+		calls:         map[string]int{},
 		Messages: []llm.Message{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
@@ -101,70 +115,156 @@ func (r *Runner) Run(ctx context.Context, system, user string, toolset []tools.T
 			return s, err
 		}
 		s.Turns++
-		msg := comp.Message
-		for i := range msg.ToolCalls {
-			if msg.ToolCalls[i].ID == "" {
-				msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", s.Turns, i)
-			}
-			if msg.ToolCalls[i].Type == "" {
-				msg.ToolCalls[i].Type = "function"
-			}
-		}
-		s.Messages = append(s.Messages, msg)
-		r.record(Step{
-			Role:             "assistant",
-			Content:          describeAssistant(msg),
-			PromptTokens:     comp.Usage.PromptTokens,
-			CompletionTokens: comp.Usage.CompletionTokens,
-		})
+		msg := s.assistant(comp)
 		if len(msg.ToolCalls) == 0 {
 			return s, nil
 		}
-		for _, call := range msg.ToolCalls {
-			out := s.runTool(ctx, call)
-			s.Messages = append(s.Messages, llm.Message{Role: "tool", ToolCallID: call.ID, Content: out})
-			r.record(Step{Role: "tool", ToolName: call.Function.Name, Content: out})
+		if s.runTools(ctx, msg) {
+			s.repeatTurns++
+		} else {
+			s.repeatTurns = 0
 		}
 		if err := ctx.Err(); err != nil {
 			return s, err
+		}
+		if s.repeatTurns >= maxRepeatTurns {
+			r.logger().WarnContext(ctx, "the model keeps repeating its tool calls; ending the investigation", "turns", s.Turns)
+			break
 		}
 	}
 	s.TurnLimitReached = true
 	return s, nil
 }
 
-// Finish appends instruction as a user message and asks for a
-// schema-constrained answer without tools. validate checks the decoded
-// answer; on failure the model gets one retry with the error.
+// Finish asks for the final answer, a JSON document matching schema, and
+// checks it with validate.
+//
+// It first asks exactly like the tool loop does: same tools, no grammar,
+// no template options. Changing any of them changes the start of the
+// prompt, and llama-server then re-processes the whole conversation
+// instead of reusing its prompt cache, which takes minutes on a long
+// review. Such an answer is free text, so it is parsed and validated, with
+// one corrected retry. Only then does Finish fall back to a
+// schema-constrained request without tools, which always parses but pays
+// for the whole prompt.
+//
+// Tools stay declared, so the model may still call one: the call is
+// refused rather than run, since a new result only invites more
+// investigation.
 func (s *Session) Finish(ctx context.Context, instruction string, schema llm.JSONSchema, validate func([]byte) error) error {
-	s.Messages = append(s.Messages, llm.Message{Role: "user", Content: instruction})
-	s.r.record(Step{Role: "user", Content: instruction})
+	s.say(instruction + "\n\nReply with only a JSON object matching this JSON Schema, without a code fence and without calling a tool:\n" + string(schema.Schema))
 
 	var lastErr error
-	for attempt := range 2 {
-		comp, err := s.complete(ctx, llm.Request{Schema: &schema, DisableThinking: true})
+	for range finishAttempts {
+		comp, err := s.complete(ctx, llm.Request{Tools: s.defs})
 		if err != nil {
 			return err
 		}
-		content := comp.Message.Content
-		s.r.record(Step{
-			Role:             "assistant",
-			Content:          content,
-			PromptTokens:     comp.Usage.PromptTokens,
-			CompletionTokens: comp.Usage.CompletionTokens,
-		})
-		if lastErr = validate([]byte(content)); lastErr == nil {
+		msg := s.assistant(comp)
+		if len(msg.ToolCalls) > 0 {
+			// Answer the calls, so the conversation stays well formed.
+			s.refuseTools(msg)
+			lastErr = errors.New("you called a tool instead of answering")
+		} else if lastErr = validate([]byte(extractJSON(msg.Content))); lastErr == nil {
 			return nil
 		}
-		if attempt == 0 {
-			retry := fmt.Sprintf("That answer was rejected: %v. Reply again with the complete, corrected JSON document.", lastErr)
-			s.Messages = append(s.Messages,
-				llm.Message{Role: "assistant", Content: content},
-				llm.Message{Role: "user", Content: retry})
-			s.r.record(Step{Role: "user", Content: retry})
+		s.say(fmt.Sprintf("That answer was rejected: %v. Reply again with only the complete, corrected JSON object.", lastErr))
+	}
+
+	s.r.logger().WarnContext(ctx, "falling back to a schema-constrained answer", "error", lastErr)
+	comp, err := s.complete(ctx, llm.Request{Schema: &schema, DisableThinking: true})
+	if err != nil {
+		return err
+	}
+	msg := s.assistant(comp)
+	if err := validate([]byte(msg.Content)); err != nil {
+		return fmt.Errorf("final answer rejected: %w", err)
+	}
+	return nil
+}
+
+// say appends a user message.
+func (s *Session) say(content string) {
+	s.Messages = append(s.Messages, llm.Message{Role: "user", Content: content})
+	s.r.record(Step{Role: "user", Content: content})
+}
+
+// assistant appends and records the model's message, giving its tool calls
+// the IDs and type llama-server may leave out.
+func (s *Session) assistant(comp llm.Completion) llm.Message {
+	msg := comp.Message
+	for i := range msg.ToolCalls {
+		if msg.ToolCalls[i].ID == "" {
+			msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", len(s.Messages), i)
+		}
+		if msg.ToolCalls[i].Type == "" {
+			msg.ToolCalls[i].Type = "function"
 		}
 	}
-	return fmt.Errorf("final answer rejected twice: %w", lastErr)
+	s.Messages = append(s.Messages, msg)
+	s.r.record(Step{
+		Role:             "assistant",
+		Content:          describeAssistant(msg),
+		PromptTokens:     comp.Usage.PromptTokens,
+		CompletionTokens: comp.Usage.CompletionTokens,
+	})
+	return msg
+}
+
+// runTools executes the tool calls of msg and appends their results. A
+// call repeating an earlier one whose output is still in the conversation
+// is not run again: the model is pointed at that output. It reports
+// whether every call was such a repeat.
+func (s *Session) runTools(ctx context.Context, msg llm.Message) bool {
+	allRepeats := len(msg.ToolCalls) > 0
+	for _, call := range msg.ToolCalls {
+		sig := callSignature(call)
+		var out string
+		if i, seen := s.calls[sig]; seen && s.Messages[i].Content != elidedNotice {
+			metrics.ToolCallsTotal.WithLabelValues(call.Function.Name, "repeat").Inc()
+			out = fmt.Sprintf("You already called %s with these arguments and its output, above, has not changed. Use it, or stop investigating and give your answer.", call.Function.Name)
+		} else {
+			allRepeats = false
+			out = s.runTool(ctx, call)
+			s.calls[sig] = len(s.Messages)
+		}
+		s.Messages = append(s.Messages, llm.Message{Role: "tool", ToolCallID: call.ID, Content: out})
+		s.r.record(Step{Role: "tool", ToolName: call.Function.Name, Content: out})
+	}
+	return allRepeats
+}
+
+// refuseTools answers the tool calls of msg without running them.
+func (s *Session) refuseTools(msg llm.Message) {
+	for _, call := range msg.ToolCalls {
+		metrics.ToolCallsTotal.WithLabelValues(call.Function.Name, "refused").Inc()
+		out := "The investigation is over: tools are closed. Answer now with only the JSON object."
+		s.Messages = append(s.Messages, llm.Message{Role: "tool", ToolCallID: call.ID, Content: out})
+		s.r.record(Step{Role: "tool", ToolName: call.Function.Name, Content: out})
+	}
+}
+
+// callSignature identifies a call by its name and arguments, with the
+// arguments re-encoded so key order and spacing do not matter.
+func callSignature(call llm.ToolCall) string {
+	args := call.Function.Arguments
+	var v any
+	if json.Unmarshal([]byte(args), &v) == nil {
+		if canonical, err := json.Marshal(v); err == nil {
+			args = string(canonical)
+		}
+	}
+	return call.Function.Name + "\x00" + args
+}
+
+// extractJSON returns the JSON object in a free-text answer: models often
+// wrap it in a code fence or a sentence.
+func extractJSON(content string) string {
+	start, end := strings.Index(content, "{"), strings.LastIndex(content, "}")
+	if start < 0 || end < start {
+		return strings.TrimSpace(content)
+	}
+	return content[start : end+1]
 }
 
 // complete sends the conversation, eliding old tool output when it nears
