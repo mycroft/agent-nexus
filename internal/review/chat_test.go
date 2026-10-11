@@ -11,6 +11,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/forge/forgetest"
 	"github.com/mycroft/agent-nexus/internal/jobs"
+	"github.com/mycroft/agent-nexus/internal/llm"
 	"github.com/mycroft/agent-nexus/internal/skill"
 	"github.com/mycroft/agent-nexus/internal/zulip"
 	"github.com/mycroft/agent-nexus/internal/zulip/zuliptest"
@@ -44,6 +45,8 @@ func TestParseTarget(t *testing.T) {
 		// Paths and links to other hosts are not references.
 		{"charts/apps/zulip.go", "", ""},
 		{"https://example.com/mycroft/k8s-home", "", ""},
+		{"https://sub.git.example.com/mycroft/k8s-home", "", ""},
+		{"notgit.example.com/mycroft/k8s-home/pulls/3", "", ""},
 		{"and/or", "", ""},
 	} {
 		got, ok := c.parseTarget(tc.text)
@@ -341,6 +344,46 @@ func TestChatReportsFailures(t *testing.T) {
 	}
 	if got := pendingChatAsks([]zulip.Message{f.zulip.Message(q.ID)}, zuliptest.Bot, false); len(got) != 1 {
 		t.Errorf("pending asks = %v", got)
+	}
+}
+
+// cancellingLLM stands for a shutdown during the model call: it cancels
+// the queue's context.
+type cancellingLLM struct{ cancel context.CancelFunc }
+
+func (l cancellingLLM) Complete(ctx context.Context, _ llm.Request) (llm.Completion, error) {
+	l.cancel()
+	<-ctx.Done()
+	return llm.Completion{}, ctx.Err()
+}
+
+func TestChatInterruptedByShutdown(t *testing.T) {
+	f := newChatFixture(t)
+	q := f.ask(alice, "@**agent-nexus** what does o/calc#4 change?")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.reviewer.LLM = cancellingLLM{cancel}
+	store, err := jobs.OpenStore(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	queue := jobs.NewQueue(store, 1, 30*time.Minute, time.Hour, quiet)
+	queue.Register(ChatKind, f.chat)
+	conv, _ := zulip.ConversationOf(q, zuliptest.Bot.Email)
+	job, _, err := queue.Enqueue(ctx, ChatJob(conv, q.ID, q.SenderFullName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The job is requeued on restart, so it reports nothing.
+	if got, _ := store.Get(context.Background(), job.ID); got.Status != jobs.Running {
+		t.Errorf("job = %s, want left running for recovery", got.Status)
+	}
+	if sent := f.zulip.Sent(); len(sent) != 0 {
+		t.Errorf("sent = %+v, want nothing", sent)
 	}
 }
 

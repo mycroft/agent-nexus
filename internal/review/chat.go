@@ -111,7 +111,11 @@ func (c *Chat) Handle(ctx context.Context, job *jobs.Job, run *jobs.Run) (jobs.R
 			})
 		}
 		if text, err = c.answer(ctx, t, conv, history, asks, me, record); err != nil {
-			c.reportFailure(ctx, conv, asks, job.ID)
+			// A cancelled job was interrupted by a shutdown, and runs
+			// again on restart: it did not fail.
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				c.reportFailure(ctx, conv, asks, job.ID)
+			}
 			return jobs.Result{}, err
 		}
 	} else {
@@ -252,14 +256,15 @@ func (c *Chat) parseTarget(text string) (chatTarget, bool) {
 }
 
 // forgeLinkPattern matches a link to a repository of f, or to one of its
-// pull requests (Gitea's /pulls/N, GitHub's /pull/N).
+// pull requests (Gitea's /pulls/N, GitHub's /pull/N). The host must start
+// there: sub.git.example.com is another host.
 func forgeLinkPattern(f forge.Forge) (*regexp.Regexp, error) {
 	u, err := url.Parse(f.ServerURL())
 	if err != nil {
 		return nil, fmt.Errorf("forge URL: %w", err)
 	}
 	root := strings.Trim(u.Host+u.Path, "/")
-	return regexp.Compile(`(?i)(?:https?://)?` + regexp.QuoteMeta(root) + `/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:/pulls?/(\d+))?`)
+	return regexp.Compile(`(?i)(?:^|[^A-Za-z0-9.-])(?:https?://)?` + regexp.QuoteMeta(root) + `/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:/pulls?/(\d+))?`)
 }
 
 // whichRepository is the answer to a question that names no repository.
