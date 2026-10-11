@@ -47,6 +47,7 @@ func TestParseTarget(t *testing.T) {
 		{"https://example.com/mycroft/k8s-home", "", ""},
 		{"https://sub.git.example.com/mycroft/k8s-home", "", ""},
 		{"notgit.example.com/mycroft/k8s-home/pulls/3", "", ""},
+		{"foo_git.example.com/mycroft/k8s-home", "", ""},
 		{"and/or", "", ""},
 	} {
 		got, ok := c.parseTarget(tc.text)

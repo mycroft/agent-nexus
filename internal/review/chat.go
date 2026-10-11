@@ -264,7 +264,7 @@ func forgeLinkPattern(f forge.Forge) (*regexp.Regexp, error) {
 		return nil, fmt.Errorf("forge URL: %w", err)
 	}
 	root := strings.Trim(u.Host+u.Path, "/")
-	return regexp.Compile(`(?i)(?:^|[^A-Za-z0-9.-])(?:https?://)?` + regexp.QuoteMeta(root) + `/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:/pulls?/(\d+))?`)
+	return regexp.Compile(`(?i)(?:^|[^A-Za-z0-9_.-])(?:https?://)?` + regexp.QuoteMeta(root) + `/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:/pulls?/(\d+))?`)
 }
 
 // whichRepository is the answer to a question that names no repository.
