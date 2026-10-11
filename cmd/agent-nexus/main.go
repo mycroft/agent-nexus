@@ -34,6 +34,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/server"
 	"github.com/mycroft/agent-nexus/internal/skill"
 	"github.com/mycroft/agent-nexus/internal/web"
+	"github.com/mycroft/agent-nexus/internal/zulip"
 	"github.com/mycroft/agent-nexus/skills"
 )
 
@@ -90,6 +91,9 @@ type app struct {
 	log      *slog.Logger
 	forges   []forge.Forge
 	reviewer *review.Reviewer
+	// chatSkill guides answers on Zulip; it is loaded when Zulip is
+	// configured.
+	chatSkill skill.Skill
 }
 
 func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, error) {
@@ -132,6 +136,11 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	discussionSkill, err := skill.Load(skillFS, "pr-discussion")
 	if err != nil {
 		return nil, err
+	}
+	if cfg.ZulipEnabled() {
+		if a.chatSkill, err = skill.Load(skillFS, "chat"); err != nil {
+			return nil, err
+		}
 	}
 	modeRules, err := review.ParseModeRules(cfg.ReviewModes)
 	if err != nil {
@@ -206,8 +215,23 @@ func serve() error {
 	a.reviewer.Enqueue = queue.Enqueue
 	queue.Register(review.Kind, a.reviewer)
 	queue.Register(review.DiscussionKind, a.reviewer.DiscussionHandler())
+	var zulipClient *zulip.Client
+	if cfg.ZulipEnabled() {
+		zulipClient = zulip.New(cfg.ZulipURL, cfg.ZulipBotEmail, cfg.ZulipBotAPIKey)
+		queue.Register(review.ChatKind, &review.Chat{
+			Reviewer:      a.reviewer,
+			Zulip:         zulipClient,
+			Forges:        a.forges,
+			AllowedOwners: cfg.AllowedOwners,
+			Skill:         a.chatSkill,
+		})
+		log.Info("zulip configured", "url", cfg.ZulipURL, "bot", cfg.ZulipBotEmail)
+	}
 
-	api := &server.Server{Queue: queue, Forges: a.forges, AllowedOwners: cfg.AllowedOwners, Keys: keys, Logger: log}
+	api := &server.Server{
+		Queue: queue, Forges: a.forges, AllowedOwners: cfg.AllowedOwners, Keys: keys,
+		Zulip: zulipClient, ZulipToken: cfg.ZulipWebhookToken, Logger: log,
+	}
 	apiServer := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           api.Handler(),

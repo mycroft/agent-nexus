@@ -29,13 +29,44 @@ const (
 	maxGrepLines     = 200
 )
 
-// Repo returns read-only tools over a repository at a fixed commit.
-// fileDiff returns the annotated diff of one changed file, if it changed.
+// Repo returns read-only tools over a pull request: the Commit tools at
+// its head, and get_file_diff. fileDiff returns the annotated diff of one
+// changed file, if it changed.
 func Repo(repo *gitrepo.Repo, rev string, fileDiff func(path string) (string, bool)) []Tool {
+	return append(Commit(repo, rev, "the pull request head"), Tool{
+		Name:        "get_file_diff",
+		Description: "Show the pull request diff of one changed file, with new-file line numbers in the left column.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{` +
+			`"path":{"type":"string","description":"Path of a changed file"}},` +
+			`"required":["path"]}`),
+		Run: func(_ context.Context, raw json.RawMessage) (string, error) {
+			var args struct {
+				Path string `json:"path"`
+			}
+			if err := decode(raw, &args); err != nil {
+				return "", err
+			}
+			clean, err := gitrepo.CleanPath(args.Path)
+			if err != nil {
+				return "", err
+			}
+			d, ok := fileDiff(clean)
+			if !ok {
+				return "", fmt.Errorf("%q is not changed by this pull request", clean)
+			}
+			return d, nil
+		},
+	})
+}
+
+// Commit returns read_file, list_dir, grep and git_log over a repository
+// at the commit rev, which their descriptions call at ("the pull request
+// head").
+func Commit(repo *gitrepo.Repo, rev, at string) []Tool {
 	return []Tool{
 		{
 			Name:        "read_file",
-			Description: "Read a file at the pull request head, with line numbers. Defaults to the first 400 lines; use start_line/end_line for other ranges.",
+			Description: "Read a file at " + at + ", with line numbers. Defaults to the first 400 lines; use start_line/end_line for other ranges.",
 			Parameters: json.RawMessage(`{"type":"object","properties":{` +
 				`"path":{"type":"string","description":"Repository-relative file path"},` +
 				`"start_line":{"type":"integer","description":"First line (1-based), default 1"},` +
@@ -59,7 +90,7 @@ func Repo(repo *gitrepo.Repo, rev string, fileDiff func(path string) (string, bo
 		},
 		{
 			Name:        "list_dir",
-			Description: "List a directory at the pull request head. Directories end with '/'.",
+			Description: "List a directory at " + at + ". Directories end with '/'.",
 			Parameters: json.RawMessage(`{"type":"object","properties":{` +
 				`"path":{"type":"string","description":"Repository-relative directory; empty for the root"}}}`),
 			Run: func(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -86,7 +117,7 @@ func Repo(repo *gitrepo.Repo, rev string, fileDiff func(path string) (string, bo
 		},
 		{
 			Name:        "grep",
-			Description: "Search tracked files at the pull request head with an extended regular expression (git grep -E). Returns path:line:text matches.",
+			Description: "Search tracked files at " + at + " with an extended regular expression (git grep -E). Returns path:line:text matches.",
 			Parameters: json.RawMessage(`{"type":"object","properties":{` +
 				`"pattern":{"type":"string","description":"Extended regular expression"},` +
 				`"path":{"type":"string","description":"Optional file or directory to limit the search to"},` +
@@ -137,30 +168,6 @@ func Repo(repo *gitrepo.Repo, rev string, fileDiff func(path string) (string, bo
 					return "no commits", nil
 				}
 				return out, nil
-			},
-		},
-		{
-			Name:        "get_file_diff",
-			Description: "Show the pull request diff of one changed file, with new-file line numbers in the left column.",
-			Parameters: json.RawMessage(`{"type":"object","properties":{` +
-				`"path":{"type":"string","description":"Path of a changed file"}},` +
-				`"required":["path"]}`),
-			Run: func(_ context.Context, raw json.RawMessage) (string, error) {
-				var args struct {
-					Path string `json:"path"`
-				}
-				if err := decode(raw, &args); err != nil {
-					return "", err
-				}
-				clean, err := gitrepo.CleanPath(args.Path)
-				if err != nil {
-					return "", err
-				}
-				d, ok := fileDiff(clean)
-				if !ok {
-					return "", fmt.Errorf("%q is not changed by this pull request", clean)
-				}
-				return d, nil
 			},
 		},
 	}

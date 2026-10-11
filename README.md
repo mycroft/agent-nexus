@@ -33,6 +33,8 @@ workflow ──POST /v1/events/pr-review──▶ API (API key, owner allowlist,
 - **Answers replies.** agent-nexus answers replies in its own review threads,
   and comments that mention `@agent-nexus`. Its later reviews take the
   discussion into account (see [Discussion](#discussion)).
+- **Answers questions on Zulip.** Mention the bot in a channel, or send it
+  a direct message, about a repository or a PR (see [Zulip](#zulip)).
 - **Comment or verdict, per repository.** By default a review is a plain
   comment. Repositories in verdict mode get an approval, a comment or a
   change request instead (see [Review modes](#review-modes)).
@@ -76,6 +78,7 @@ Everything is configured through environment variables.
 | `GITEA_URL`, `GITEA_USER`, `GITEA_TOKEN` | | Gitea forge (bot account) |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | | GitHub forge (App, PEM key) |
 | `GITHUB_API_URL`, `GITHUB_SERVER_URL` | github.com | For GitHub Enterprise |
+| `ZULIP_URL`, `ZULIP_BOT_EMAIL`, `ZULIP_BOT_API_KEY`, `ZULIP_WEBHOOK_TOKEN` | | Zulip outgoing webhook bot: server root, then the `email`, `key` and `token` of its zuliprc |
 | `LISTEN_ADDR` | `:8080` | API |
 | `METRICS_ADDR` | `:9090` | `/metrics`; keep it out of the Ingress |
 | `UI_ADDR` | `:8081` | Jobs UI, unauthenticated: expose it only behind an authenticating proxy |
@@ -296,9 +299,58 @@ scope; without it, agent-nexus sees review threads only.
 - Answering mentions with a PR comment needs `write:issue`. Without it,
   agent-nexus answers with a comment-only review instead.
 
+## Zulip
+
+With a Zulip bot configured, agent-nexus answers questions about the
+repositories and PRs it can read on its forges. In a channel, mention the
+bot (`@**agent-nexus**`); in a direct message, just ask. It answers in the
+same topic or conversation, mentioning the askers in a channel.
+
+**What it reads.** A pass works out what the conversation is about from,
+in order:
+
+1. the questions it answers, newest first;
+2. the other users' earlier messages;
+3. the topic name;
+4. the channel name.
+
+The first reference found wins:
+
+- `owner/name#12`, or a link to a PR, is a PR. agent-nexus reads it like
+  a PR discussion: the diff, the head commit, the forge discussion and its
+  own reviews. This works for closed and merged PRs too.
+- `owner/name`, or a link to the repository or a file in it, is the
+  repository. agent-nexus reads the head of its default branch, with the
+  same read-only tools, minus `get_file_diff`.
+
+Only owners in `ALLOWED_OWNERS` count. `owner/name` refers to the first
+configured forge (Gitea when both are); link a repository of the other
+one. A question that names nothing gets asked which repository it is
+about. Naming a topic after a repository or PR (`mycroft/k8s-home#1685`)
+sets it for every question in that topic.
+
+**One pass per conversation.** Like a PR discussion, a pass reads the
+conversation's latest 50 messages rather than the triggering message, and
+answers every pending question in one message:
+
+- 👀 on a question means its job is queued.
+- ✅ means it is answered. Only the bot's own ✅ counts, so a question
+  without it is answered by the next pass.
+- If the job fails, the bot says so and leaves the question pending; the
+  next question in the conversation retries it.
+
+A newer message replaces a queued pass, and a running pass finishes, as
+for PR discussions. Answers follow
+[`skills/chat/SKILL.md`](skills/chat/SKILL.md).
+
+**Access.** Anyone in the Zulip organization can ask, about any
+repository of `ALLOWED_OWNERS` the forge bot can read. Answers may quote
+private code into the channel they are asked in. agent-nexus never writes
+to a forge from Zulip: to get a review, ask for it on the PR.
+
 ## API
 
-All `/v1` routes require `Authorization: Bearer <api key>`.
+All `/v1` routes but the Zulip webhook require `Authorization: Bearer <api key>`.
 
 - `POST /v1/events/pr-review` takes `{"server_url", "repo", "pr", "head_sha"}`,
   and optionally `"force": true` to review a commit that was already
@@ -311,12 +363,17 @@ All `/v1` routes require `Authorization: Bearer <api key>`.
   waiting for the bot.
   - `202` with `{"job_id"}`. A newer event replaces a queued pass; a running
     pass finishes. Closed and merged PRs are discussed too.
+- `POST /v1/events/zulip` receives the Zulip bot's outgoing webhook. It
+  needs no API key: Zulip authenticates with the bot's webhook token, in the
+  body. It queues a pass over the message's conversation and answers
+  `200` with `{"response_not_required": true}`; the job posts the answer.
+  The route exists only when Zulip is configured.
 - `GET /v1/jobs` lists recent jobs, newest first, with their payload
   (forge, repository, PR) and their progress so far:
   - progress fields: `turns`, `peak_prompt_tokens`, `prompt_tokens`,
     `completion_tokens`, `last_activity`;
-  - filters: `?status=running,queued` (comma-separated), `?kind=pr_review`
-    or `pr_discussion`, `?limit=20` (at most 100).
+  - filters: `?status=running,queued` (comma-separated), `?kind=pr_review`,
+    `pr_discussion` or `chat_question`, `?limit=20` (at most 100).
 - `GET /v1/jobs/{id}` returns the job's status, result or error, and
   token usage.
 - `GET /v1/jobs/{id}/steps` returns the agent transcript: prompts, tool
@@ -385,6 +442,7 @@ keys:
 - `llm-api-key` (optional)
 - `gitea-token` (when Gitea is enabled)
 - `github-app-private-key` (when GitHub is enabled)
+- `zulip-bot-api-key` and `zulip-webhook-token` (when Zulip is enabled)
 
 Everything else lives in [`values.yaml`](charts/agent-nexus/values.yaml).
 The chart fails to render when a required setting is missing.
@@ -467,6 +525,26 @@ jobs:
     secrets:
       AGENT_NEXUS_API_KEY: ${{ secrets.AGENT_NEXUS_API_KEY }}
 ```
+
+### Zulip
+
+1. **Create the bot.** In Zulip, open Personal settings → Bots → Add a new
+   bot:
+   - bot type: *Outgoing webhook*;
+   - endpoint URL: agent-nexus's `/v1/events/zulip`, e.g.
+     `http://agent-nexus.agent-nexus.svc:8080/v1/events/zulip` from inside
+     the cluster;
+   - outgoing webhook format: *Zulip*.
+2. **Configure agent-nexus.** Download the bot's zuliprc. Set `ZULIP_URL`
+   to the server root, and `ZULIP_BOT_EMAIL`, `ZULIP_BOT_API_KEY` and
+   `ZULIP_WEBHOOK_TOKEN` to its `email`, `key` and `token`.
+3. **Private channels.** Subscribe the bot to the private channels where it
+   is asked questions, so it can read their history.
+4. **Network.** Zulip sends outgoing webhooks through its Smokescreen proxy,
+   which refuses private addresses. If agent-nexus has one, allow it with
+   `CONFIG_http_proxy__allow_addresses` (or `__allow_ranges`) in Zulip's
+   environment, and let Zulip through any NetworkPolicy in front of
+   agent-nexus.
 
 ## Development
 

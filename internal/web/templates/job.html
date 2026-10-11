@@ -36,7 +36,8 @@
     <h1 class="text-lg font-semibold">
       <span class="font-mono text-slate-400">#{{.ID}}</span> {{kindLabel .Kind}}{{if .Repo}} of
       {{- if .PRURL}} <a href="{{.PRURL}}" class="text-violet-600 hover:underline dark:text-violet-400" rel="noreferrer">{{.Repo}}#{{.PR}}</a>
-      {{- else}} {{.Repo}}#{{.PR}}{{end}}{{end}}
+      {{- else}} {{.Repo}}#{{.PR}}{{end}}
+      {{- else if .Label}} in {{.Label}}{{end}}
     </h1>
     {{- if .Forced}}<span class="rounded bg-violet-100 px-1.5 py-0.5 text-xs text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">requested</span>{{end}}
     {{template "status-pill" .Status}}

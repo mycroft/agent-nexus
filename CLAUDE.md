@@ -27,10 +27,15 @@ The flow is event → job → handler → agent → forge.
   - `pendingAsks` finds human replies in threads the bot took part in, and mentions of `@agent-nexus`, that no reply marker covers.
   - Answers follow `skills/pr-discussion`.
   - `renderHistory` feeds the same discussion to later reviews.
+- **`internal/review` (chat):** the `chat_question` handler (`Chat`), for questions asked on Zulip. `POST /v1/events/zulip` receives the bot's outgoing webhook (authenticated by the token in its body, not an API key), queues a pass over the message's conversation with `KeepRunning`, and reacts 👀.
+  - `pendingChatAsks` finds the other users' messages mentioning the bot (every one, in a direct conversation) that the bot has not reacted ✅ to.
+  - `target` picks the repository or pull request from the first `owner/name[#n]` or forge link in the asks, the earlier messages, the topic, then the channel name. A pull request gets the discussion workspace (`prepare`); a repository gets a branch workspace (`prepareBranch`: the default branch's head, no diff, `tools.Commit`).
+  - Answers follow `skills/chat`. One answer covers every pending question, then they get ✅.
+- **`internal/zulip`:** a hand-rolled Zulip client (`History`, `Send`, `React`) and the outgoing webhook payload. `zuliptest.Fake` is an in-memory Zulip server for tests.
 - **`internal/agent`:** the tool-calling loop. It records the transcript and elides old tool output as the conversation nears the context window. It also stops investigating when the context's deadline (`JOB_TIMEOUT`) leaves time only for another turn and the final answer, each estimated at the slowest turn so far, so a slow model yields a shorter review, not a timed-out job. `Finish` likewise skips its remaining cache-friendly retries for the schema-constrained fallback (no thinking, always parses) when no time is left for another call. In the last three turns, by the turn limit or the deadline, the loop tells the model how many it has left (`turnsLeftNote`), so it concludes rather than being cut short.
 - **`internal/llm`:** a hand-rolled OpenAI-compatible client, with llama-server extras (`reasoning_content`, `chat_template_kwargs`, `thinking_budget_tokens` from `LLM_THINKING_BUDGET`, `/props`). Only sampling parameters may vary between the calls of a conversation: anything that changes the rendered prompt (tools, template kwargs) costs llama-server its prompt cache.
 - **`internal/gitrepo`:** a bare-repo cache plus a hardened git CLI wrapper. Nothing is ever checked out.
-- **`internal/tools`:** read-only tools over git objects.
+- **`internal/tools`:** read-only tools over git objects: `Commit` at a commit, `Repo` adds a pull request's `get_file_diff`.
 - **`internal/forge`:** Gitea (bot token) and GitHub (App JWT → installation token), as hand-rolled REST clients. `forgetest.Fake` is an in-memory forge for tests.
 - **`internal/remote`:** the agent's internet access. `NewHTTPClient` only dials public addresses; `Client` adds size-capped GETs, anonymous OCI registry reads (`RegistryGet`, `ImageLabels`), GitHub releases and pages as text (`FetchPage`).
 - **`internal/charts`:** reads Helm chart packages from HTTP (`index.yaml`) and OCI repositories through `remote.Client`, caches them on disk and unpacks them in memory.
@@ -48,6 +53,7 @@ The flow is event → job → handler → agent → forge.
 - **Forge POSTs are never retried by the HTTP client.** A failed Gitea review can leave a pending review behind. `Post` deletes it and checks for the marker before trying again.
 - **Repository guidance comes from the base commit,** never the PR head.
 - **A review marker names the commit, or for a forced review also the job** (`reviewMarker`). A forced review (a review request, or an `@agent-nexus review` comment, which `requestReview` handles without the LLM) is therefore never mistaken for the commit's earlier review, and is still posted only once.
+- **Chat answers never write to a forge,** and only name repositories of `ALLOWED_OWNERS`. Only the bot's own ✅ reaction marks a Zulip question answered.
 - **Never trust the triggering comment.** A discussion pass rescans the whole discussion. The bot's own notes never count as asks, which prevents loops, and every answer carries `<!-- agent-nexus:reply-to=<kind>:<id> -->` markers.
 - **Model-chosen URLs never carry free text.**
   - A chart repository URL must appear verbatim in the base commit (`Repo.Contains`).

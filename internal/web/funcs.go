@@ -49,6 +49,7 @@ var roleBadges = map[string]string{
 var kindLabels = map[string]string{
 	"pr_review":     "Review",
 	"pr_discussion": "Discussion",
+	"chat_question": "Chat",
 }
 
 var funcs = template.FuncMap{

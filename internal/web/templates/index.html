@@ -17,7 +17,7 @@
         <span class="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-75"></span>
         <span class="relative inline-flex size-2.5 rounded-full bg-amber-500"></span>
       </span>
-      <span class="font-medium">{{kindLabel .Kind}} of {{.Repo}}#{{.PR}}</span>
+      <span class="font-medium">{{kindLabel .Kind}} {{if .Repo}}of {{.Repo}}#{{.PR}}{{else}}in {{.Label}}{{end}}</span>
       {{- if .Forced}}<span class="rounded bg-violet-100 px-1.5 py-0.5 text-xs text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">requested</span>{{end}}
       {{template "status-pill" .Status}}
       <span class="ml-auto text-sm tabular-nums text-amber-800 dark:text-amber-300">{{if .StartedAt}}running for {{duration .StartedAt nil}}{{end}}</span>
@@ -44,7 +44,7 @@
     <span class="text-slate-500 dark:text-slate-400">Queued</span>
     {{- range .}}
     <a href="/jobs/{{.ID}}" class="rounded-lg border border-slate-200 bg-white px-2 py-0.5 text-xs hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700">
-      <span class="font-mono text-slate-400">#{{.ID}}</span> {{kindLabel .Kind}} {{.Repo}}#{{.PR}}
+      <span class="font-mono text-slate-400">#{{.ID}}</span> {{kindLabel .Kind}} {{if .Repo}}{{.Repo}}#{{.PR}}{{else}}{{.Label}}{{end}}
     </a>
     {{- end}}
   </div>
@@ -107,9 +107,10 @@
     <a href="/jobs/{{.ID}}" class="font-mono text-slate-400 hover:text-violet-600 dark:hover:text-violet-400">#{{.ID}}</a>
     <span class="ml-1.5 font-medium">{{kindLabel .Kind}}</span>
     {{- if .Forced}} <span class="rounded bg-violet-100 px-1 py-px text-[10px] text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">requested</span>{{end}}
-    {{- if .Repo}}<div class="text-xs text-slate-500 sm:hidden dark:text-slate-400">{{.Repo}}#{{.PR}}</div>{{end}}
+    {{- if .Repo}}<div class="text-xs text-slate-500 sm:hidden dark:text-slate-400">{{.Repo}}#{{.PR}}</div>
+    {{- else if .Label}}<div class="text-xs text-slate-500 sm:hidden dark:text-slate-400">{{.Label}}</div>{{end}}
   </td>
-  <td class="hidden whitespace-nowrap px-4 py-2 sm:table-cell">{{if .Repo}}{{.Repo}}<span class="text-slate-400">#{{.PR}}</span>{{end}}</td>
+  <td class="hidden whitespace-nowrap px-4 py-2 sm:table-cell">{{if .Repo}}{{.Repo}}<span class="text-slate-400">#{{.PR}}</span>{{else}}{{.Label}}{{end}}</td>
   <td class="whitespace-nowrap px-4 py-2">{{template "status-pill" .Status}}</td>
   <td class="hidden max-w-56 truncate px-4 py-2 text-slate-600 lg:table-cell dark:text-slate-400" title="{{.Error}}">{{.Outcome}}</td>
   <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums xl:table-cell">{{with .Progress.Turns}}{{.}}{{end}}</td>

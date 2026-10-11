@@ -19,6 +19,8 @@ type Fake struct {
 	URL       string
 	Login     string
 	Remote    gitrepo.Remote
+	// Branch is the default branch, "main" when empty.
+	Branch string
 
 	mu  sync.Mutex
 	prs map[int]forge.PR
@@ -179,6 +181,14 @@ func (f *Fake) Comment(_ context.Context, _ forge.Repo, _ int, body string) erro
 	n := f.addNote(forge.Note{Kind: forge.NoteComment, User: f.Login, Body: body})
 	f.replies = append(f.replies, n)
 	return nil
+}
+
+// DefaultBranch implements forge.Forge.
+func (f *Fake) DefaultBranch(context.Context, forge.Repo) (string, error) {
+	if f.Branch == "" {
+		return "main", nil
+	}
+	return f.Branch, nil
 }
 
 // GitRemote implements forge.Forge.

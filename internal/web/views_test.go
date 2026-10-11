@@ -62,6 +62,8 @@ func TestOutcome(t *testing.T) {
 		{jobs.Succeeded, `{"verdict":"approve","findings":1}`, "approve · 1 finding"},
 		{jobs.Succeeded, `{"outcome":"answered","answered":3,"approved":false}`, "3 answered"},
 		{jobs.Succeeded, `{"outcome":"answered","answered":1,"approved":true}`, "1 answered · approved"},
+		{jobs.Succeeded, `{"outcome":"answered","answered":2,"repo":"mycroft/k8s-home#3"}`, "2 answered · mycroft/k8s-home#3"},
+		{jobs.Succeeded, `{"outcome":"no_repository","answered":1}`, "asked which repository"},
 		{jobs.Succeeded, `{"outcome":"approved","approved":true}`, "approved"},
 		{jobs.Succeeded, `{"outcome":"already_posted"}`, "already posted"},
 		{jobs.Skipped, `{"outcome":"skipped_closed","verdict":"approve"}`, "pull request closed"},
@@ -81,6 +83,10 @@ func TestNewJobViewWithoutPullRequest(t *testing.T) {
 	v := newJobView(jobs.JobSummary{Job: jobs.Job{Payload: []byte(`{"question":"?"}`)}}, map[string]string{"gitea": "https://git.example"})
 	if v.Repo != "" || v.PRURL != "" {
 		t.Errorf("view = %+v, want no pull request", v)
+	}
+	v = newJobView(jobs.JobSummary{Job: jobs.Job{Payload: []byte(`{"conversation":{"stream_id":3},"label":"#ops > helm"}`)}}, nil)
+	if v.Repo != "" || v.Label != "#ops > helm" {
+		t.Errorf("view = %+v, want the chat conversation's label", v)
 	}
 }
 

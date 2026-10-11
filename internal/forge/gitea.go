@@ -105,6 +105,17 @@ func (g *Gitea) GetPR(ctx context.Context, repo Repo, number int) (PR, error) {
 	}, nil
 }
 
+// DefaultBranch implements Forge.
+func (g *Gitea) DefaultBranch(ctx context.Context, repo Repo) (string, error) {
+	var r struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := g.api.do(ctx, http.MethodGet, "/repos/"+repo.String(), g.auth, nil, &r); err != nil {
+		return "", fmt.Errorf("gitea: %w", err)
+	}
+	return r.DefaultBranch, nil
+}
+
 type giteaReview struct {
 	ID            int64     `json:"id"`
 	User          giteaUser `json:"user"`

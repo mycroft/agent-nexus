@@ -14,6 +14,8 @@ fullnameOverride: ""
 #   llm-api-key             bearer token for the LLM server (optional)
 #   gitea-token             token of the Gitea bot (when gitea.enabled)
 #   github-app-private-key  PEM private key of the GitHub App (when github.enabled)
+#   zulip-bot-api-key       API key of the Zulip bot (when zulip.enabled)
+#   zulip-webhook-token     token of the Zulip bot's outgoing webhook (when zulip.enabled)
 existingSecret: ""
 
 llm:
@@ -45,7 +47,18 @@ github:
   apiURL: https://api.github.com
   serverURL: https://github.com
 
-# Repository owners whose pull requests may be reviewed (required).
+# Answers questions about repositories and pull requests asked on Zulip,
+# to an outgoing webhook bot calling POST /v1/events/zulip: mention it in a
+# channel, or send it a direct message.
+zulip:
+  enabled: false
+  # Root URL of the Zulip server, e.g. https://zulip.example.com.
+  url: ""
+  # Email of the bot, as shown in its zuliprc.
+  botEmail: ""
+
+# Repository owners whose pull requests may be reviewed, and whose
+# repositories may be discussed on Zulip (required).
 allowedOwners: []
 
 review:

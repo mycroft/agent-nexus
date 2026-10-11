@@ -79,6 +79,14 @@ type Config struct {
 	GitHubAppPrivateKey string
 	GitHubAPIURL        string
 	GitHubServerURL     string
+
+	// ZulipURL, ZulipBotEmail and ZulipBotAPIKey let agent-nexus answer
+	// questions asked on Zulip, as the outgoing webhook bot whose requests
+	// carry ZulipWebhookToken.
+	ZulipURL          string
+	ZulipBotEmail     string
+	ZulipBotAPIKey    string
+	ZulipWebhookToken string
 }
 
 // Load reads configuration from the environment and applies defaults.
@@ -105,6 +113,10 @@ func Load() (Config, error) {
 		GitHubAppPrivateKey: os.Getenv("GITHUB_APP_PRIVATE_KEY"),
 		GitHubAPIURL:        strings.TrimRight(getEnv("GITHUB_API_URL", "https://api.github.com"), "/"),
 		GitHubServerURL:     strings.TrimRight(getEnv("GITHUB_SERVER_URL", "https://github.com"), "/"),
+		ZulipURL:            strings.TrimRight(os.Getenv("ZULIP_URL"), "/"),
+		ZulipBotEmail:       os.Getenv("ZULIP_BOT_EMAIL"),
+		ZulipBotAPIKey:      os.Getenv("ZULIP_BOT_API_KEY"),
+		ZulipWebhookToken:   os.Getenv("ZULIP_WEBHOOK_TOKEN"),
 	}
 
 	var err error
@@ -144,7 +156,7 @@ func Load() (Config, error) {
 	if c.LLMModel == "" {
 		return Config{}, errors.New("LLM_MODEL is required")
 	}
-	if err := requireAllOrNone(map[string]string{
+	if err := requireAllOrNone("Gitea", map[string]string{
 		"GITEA_URL":   c.GiteaURL,
 		"GITEA_USER":  c.GiteaUser,
 		"GITEA_TOKEN": c.GiteaToken,
@@ -155,7 +167,7 @@ func Load() (Config, error) {
 	if c.GitHubAppID != 0 {
 		githubID = "set"
 	}
-	if err := requireAllOrNone(map[string]string{
+	if err := requireAllOrNone("the GitHub App", map[string]string{
 		"GITHUB_APP_ID":          githubID,
 		"GITHUB_APP_PRIVATE_KEY": c.GitHubAppPrivateKey,
 	}); err != nil {
@@ -163,6 +175,14 @@ func Load() (Config, error) {
 	}
 	if !c.GiteaEnabled() && !c.GitHubEnabled() {
 		return Config{}, errors.New("configure at least one forge (GITEA_* or GITHUB_APP_*)")
+	}
+	if err := requireAllOrNone("Zulip", map[string]string{
+		"ZULIP_URL":           c.ZulipURL,
+		"ZULIP_BOT_EMAIL":     c.ZulipBotEmail,
+		"ZULIP_BOT_API_KEY":   c.ZulipBotAPIKey,
+		"ZULIP_WEBHOOK_TOKEN": c.ZulipWebhookToken,
+	}); err != nil {
+		return Config{}, err
 	}
 	return c, nil
 }
@@ -173,7 +193,11 @@ func (c Config) GiteaEnabled() bool { return c.GiteaURL != "" }
 // GitHubEnabled reports whether the GitHub App forge is configured.
 func (c Config) GitHubEnabled() bool { return c.GitHubAppID != 0 }
 
-func requireAllOrNone(values map[string]string) error {
+// ZulipEnabled reports whether the Zulip bot is configured.
+func (c Config) ZulipEnabled() bool { return c.ZulipURL != "" }
+
+// requireAllOrNone checks that the settings of what are all set, or none.
+func requireAllOrNone(what string, values map[string]string) error {
 	set := 0
 	for _, v := range values {
 		if v != "" {
@@ -185,7 +209,7 @@ func requireAllOrNone(values map[string]string) error {
 	}
 	for key, v := range values {
 		if v == "" {
-			return fmt.Errorf("%s is required when its forge is configured", key)
+			return fmt.Errorf("%s is required when %s is configured", key, what)
 		}
 	}
 	return nil

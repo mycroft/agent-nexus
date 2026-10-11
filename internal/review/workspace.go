@@ -19,9 +19,12 @@ import (
 
 // workspace is a pull request ready for the agent: the repository at the
 // head commit, the diff against the merge-base, and the base branch's
-// repository guidance.
+// repository guidance. A branch workspace (prepareBranch) is a branch's
+// head commit instead, without a diff.
 type workspace struct {
-	repo          *gitrepo.Repo
+	repo *gitrepo.Repo
+	// branch is the branch of a branch workspace, "" for a pull request.
+	branch        string
 	baseSHA       string
 	headSHA       string
 	files         []*diff.File
@@ -76,16 +79,49 @@ func (r *Reviewer) prepare(ctx context.Context, f forge.Forge, repoID forge.Repo
 		return nil, "", fmt.Errorf("parse diff: %w", err)
 	}
 
-	w := &workspace{
-		repo: repo, baseSHA: baseSHA, headSHA: headSHA, files: files, byPath: map[string]*diff.File{},
-		contextTokens: r.ContextTokens, charts: r.Charts, remote: r.Remote, fetchHosts: r.FetchHosts,
-		forge: f, repos: r.Repos, repoID: repoID,
-	}
+	w := r.newWorkspace(ctx, f, repoID, repo, baseSHA, headSHA)
+	w.files = files
 	for _, file := range files {
 		w.byPath[file.Path()] = file
 		if file.Status == diff.Renamed {
 			w.byPath[file.OldPath] = file
 		}
+	}
+	return w, "", nil
+}
+
+// prepareBranch fetches the head of the repository's default branch, for
+// questions about the repository rather than a pull request. That commit
+// is also the base of the URL policies.
+func (r *Reviewer) prepareBranch(ctx context.Context, f forge.Forge, repoID forge.Repo) (*workspace, error) {
+	branch, err := f.DefaultBranch(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	remote, err := f.GitRemote(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	repo, commits, _, err := r.Repos.FetchRefs(ctx, remote, []string{branch})
+	if err != nil {
+		return nil, err
+	}
+	sha, ok := commits[branch]
+	if !ok {
+		return nil, fmt.Errorf("branch %s of %s not found", branch, repoID)
+	}
+	w := r.newWorkspace(ctx, f, repoID, repo, sha, sha)
+	w.branch = branch
+	return w, nil
+}
+
+// newWorkspace returns a workspace without a diff, with the repository
+// guidance of baseSHA.
+func (r *Reviewer) newWorkspace(ctx context.Context, f forge.Forge, repoID forge.Repo, repo *gitrepo.Repo, baseSHA, headSHA string) *workspace {
+	w := &workspace{
+		repo: repo, baseSHA: baseSHA, headSHA: headSHA, byPath: map[string]*diff.File{},
+		contextTokens: r.ContextTokens, charts: r.Charts, remote: r.Remote, fetchHosts: r.FetchHosts,
+		forge: f, repos: r.Repos, repoID: repoID,
 	}
 	for _, name := range guidanceFiles {
 		if content, err := repo.ReadFile(ctx, baseSHA, name); err == nil {
@@ -93,7 +129,7 @@ func (r *Reviewer) prepare(ctx context.Context, f forge.Forge, repoID forge.Repo
 			break
 		}
 	}
-	return w, "", nil
+	return w
 }
 
 // fileDiff returns the annotated diff of one changed file.
@@ -110,6 +146,9 @@ func (w *workspace) fileDiff(path string) (string, bool) {
 
 func (w *workspace) tools() []tools.Tool {
 	out := tools.Repo(w.repo, w.headSHA, w.fileDiff)
+	if w.branch != "" {
+		out = tools.Commit(w.repo, w.headSHA, "the head of the "+w.branch+" branch")
+	}
 	if w.charts != nil {
 		out = append(out, tools.Charts(w.charts, w.chartPolicy)...)
 	}
@@ -125,14 +164,19 @@ func (w *workspace) tools() []tools.Tool {
 // toolsSentence tells the model which tools it has.
 func (w *workspace) toolsSentence() string {
 	s := "You have read-only tools over the repository at the pull request's head commit: read_file, list_dir, grep, git_log and get_file_diff."
+	base := "base branch"
+	if w.branch != "" {
+		s = fmt.Sprintf("You have read-only tools over the repository at the head of its %s branch (%s): read_file, list_dir, grep and git_log.", w.branch, short(w.headSHA))
+		base = w.branch + " branch"
+	}
 	if w.charts != nil {
-		s += " chart_files, chart_read and chart_diff read published Helm chart versions, from the chart repositories the repository's base branch references."
+		s += " chart_files, chart_read and chart_diff read published Helm chart versions, from the chart repositories the repository's " + base + " references."
 	}
 	if w.remote != nil {
-		s += " fetch_url reads documentation pages on hosts the base branch references, and release_notes the GitHub release notes of a container image it references."
+		s += " fetch_url reads documentation pages on hosts the " + base + " references, and release_notes the GitHub release notes of a container image it references."
 	}
 	if w.forge != nil && w.repos != nil {
-		s += " repo_log and repo_read read other repositories of this forge that the base branch references, such as the source of a self-built image or chart."
+		s += " repo_log and repo_read read other repositories of this forge that the " + base + " references, such as the source of a self-built image or chart."
 	}
 	return s
 }

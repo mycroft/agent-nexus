@@ -68,6 +68,9 @@ Fail early on settings agent-nexus would refuse at startup.
 {{- if and .Values.github.enabled (not .Values.github.appID) }}
 {{- fail "github.appID is required when github.enabled" }}
 {{- end }}
+{{- if and .Values.zulip.enabled (not (and .Values.zulip.url .Values.zulip.botEmail)) }}
+{{- fail "zulip.url and zulip.botEmail are required when zulip.enabled" }}
+{{- end }}
 {{- end }}
 
 {{/*

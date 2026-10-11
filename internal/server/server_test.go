@@ -16,6 +16,8 @@ import (
 	"github.com/mycroft/agent-nexus/internal/forge/forgetest"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/review"
+	"github.com/mycroft/agent-nexus/internal/zulip"
+	"github.com/mycroft/agent-nexus/internal/zulip/zuliptest"
 )
 
 var (
@@ -318,5 +320,69 @@ func TestForcedPREvent(t *testing.T) {
 	_ = json.Unmarshal(job.Payload, &req)
 	if !req.Force || job.GroupKey != "gitea:mycroft/repo#1" {
 		t.Errorf("forced job = %+v, payload %+v", job, req)
+	}
+}
+
+func TestZulipEvent(t *testing.T) {
+	ctx := context.Background()
+	store, err := jobs.OpenStore(ctx, filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	log := slog.New(slog.DiscardHandler)
+	q := jobs.NewQueue(store, 1, time.Minute, time.Hour, log)
+	q.Register(review.ChatKind, noopHandler{})
+	z := zuliptest.New(t)
+	keys, err := auth.ParseKeys("test="+apiKey, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Queue: q, Keys: keys, Zulip: z.Client(), ZulipToken: "webhook-token", Logger: log}
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	alice := zulip.User{ID: 7, FullName: "Alice"}
+	m := z.Add(zuliptest.StreamMessage(3, "dev", "Calc", alice, "@**agent-nexus** what is o/calc?"))
+	outgoing := func(token string, m zulip.Message) zulip.Outgoing {
+		return zulip.Outgoing{BotEmail: zuliptest.Bot.Email, Token: token, Trigger: "mention", Message: m}
+	}
+
+	if code, _ := postTo(t, srv, "/v1/events/zulip", "", outgoing("wrong", m)); code != http.StatusUnauthorized {
+		t.Errorf("wrong token → %d", code)
+	}
+	if code, _ := postTo(t, srv, "/v1/events/zulip", "", outgoing("", m)); code != http.StatusUnauthorized {
+		t.Errorf("no token → %d", code)
+	}
+	if code, _ := postTo(t, srv, "/v1/events/zulip", "", outgoing("webhook-token", zulip.Message{ID: 9, Type: "other"})); code != http.StatusBadRequest {
+		t.Errorf("unknown message type → %d", code)
+	}
+
+	// Zulip retries a message it got no answer for: it is one job.
+	for range 2 {
+		code, body := postTo(t, srv, "/v1/events/zulip", "", outgoing("webhook-token", m))
+		if code != http.StatusOK || body["response_not_required"] != true {
+			t.Fatalf("event → %d %v", code, body)
+		}
+	}
+	list, err := store.List(ctx, jobs.ListFilter{Kind: review.ChatKind})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].GroupKey != "zulip:stream:3:calc" || list[0].Status != jobs.Queued || list[0].APIKeyName != "zulip:Alice" {
+		t.Fatalf("jobs = %+v", list)
+	}
+	var payload review.ChatRequest
+	if err := json.Unmarshal(list[0].Payload, &payload); err != nil || payload.Conversation.Topic != "Calc" || payload.Label != "#dev > Calc" {
+		t.Errorf("payload = %+v, %v", payload, err)
+	}
+	if got := z.Message(m.ID); !got.ReactedBy(zuliptest.Bot.ID, review.ChatSeenEmoji) {
+		t.Errorf("question not acknowledged: %+v", got.Reactions)
+	}
+
+	// Without Zulip, there is no such endpoint.
+	plain, _, _ := newTestServer(t)
+	if code, _ := postTo(t, plain, "/v1/events/zulip", "", outgoing("", m)); code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
+		t.Errorf("without Zulip → %d", code)
 	}
 }

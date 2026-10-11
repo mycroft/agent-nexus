@@ -104,6 +104,14 @@ spec:
               value: {{ .Values.github.serverURL | quote }}
             {{- include "agent-nexus.secretEnv" (dict "name" "GITHUB_APP_PRIVATE_KEY" "secret" .Values.existingSecret "key" "github-app-private-key") | nindent 12 }}
             {{- end }}
+            {{- if .Values.zulip.enabled }}
+            - name: ZULIP_URL
+              value: {{ .Values.zulip.url | quote }}
+            - name: ZULIP_BOT_EMAIL
+              value: {{ .Values.zulip.botEmail | quote }}
+            {{- include "agent-nexus.secretEnv" (dict "name" "ZULIP_BOT_API_KEY" "secret" .Values.existingSecret "key" "zulip-bot-api-key") | nindent 12 }}
+            {{- include "agent-nexus.secretEnv" (dict "name" "ZULIP_WEBHOOK_TOKEN" "secret" .Values.existingSecret "key" "zulip-webhook-token") | nindent 12 }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

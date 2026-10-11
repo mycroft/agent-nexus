@@ -141,6 +141,8 @@ type Forge interface {
 	// BotLogin is the login reviews are posted under.
 	BotLogin(ctx context.Context) (string, error)
 	GetPR(ctx context.Context, repo Repo, number int) (PR, error)
+	// DefaultBranch returns the name of the repository's default branch.
+	DefaultBranch(ctx context.Context, repo Repo) (string, error)
 	ListReviews(ctx context.Context, repo Repo, number int) ([]Review, error)
 	// DeletePendingReviews removes unsubmitted reviews left by the bot
 	// after a failed submission.

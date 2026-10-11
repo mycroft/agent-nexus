@@ -53,6 +53,9 @@ func TestGitea(t *testing.T) {
 		_, _ = io.WriteString(w, `{"number":3,"title":"T","body":"B","user":{"login":"me"},"state":"closed","merged":true,"draft":true,
 			"html_url":"https://g/o/r/pulls/3","merge_base":"mb","base":{"ref":"main","sha":"b"},"head":{"sha":"h"}}`)
 	})
+	mux.HandleFunc("GET /api/v1/repos/o/r", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"full_name":"o/r","default_branch":"trunk"}`)
+	})
 	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `[
 			{"id":1,"user":{"login":"agent-nexus"},"state":"PENDING","body":""},
@@ -86,6 +89,12 @@ func TestGitea(t *testing.T) {
 	}
 	if _, err := g.GetPR(ctx, repo, 4); !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetPR(missing) error = %v, want ErrNotFound", err)
+	}
+	if branch, err := g.DefaultBranch(ctx, repo); err != nil || branch != "trunk" {
+		t.Errorf("DefaultBranch = %q, %v; want trunk", branch, err)
+	}
+	if _, err := g.DefaultBranch(ctx, Repo{Owner: "o", Name: "missing"}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DefaultBranch(missing) error = %v, want ErrNotFound", err)
 	}
 
 	if err := g.DeletePendingReviews(ctx, repo, 3); err != nil {
@@ -199,6 +208,9 @@ func TestGitHubAppAuth(t *testing.T) {
 		_, _ = io.WriteString(w, `{"number":5,"title":"T","user":{"login":"me"},"state":"closed","merged":true,"draft":false,
 			"base":{"ref":"main","sha":"b"},"head":{"sha":"h"}}`)
 	}))
+	mux.HandleFunc("GET /repos/o/r", installation(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"full_name":"o/r","default_branch":"main"}`)
+	}))
 	mux.HandleFunc("POST /repos/o/r/pulls/5/reviews", installation(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&review)
 		_, _ = io.WriteString(w, `{"id":1}`)
@@ -226,6 +238,9 @@ func TestGitHubAppAuth(t *testing.T) {
 		if !pr.Merged || pr.MergeBase != "b" {
 			t.Errorf("GetPR = %+v, want merged with merge base b", pr)
 		}
+	}
+	if branch, err := g.DefaultBranch(ctx, repo); err != nil || branch != "main" {
+		t.Errorf("DefaultBranch = %q, %v; want main", branch, err)
 	}
 	if installCalls.Load() != 1 || tokenCalls.Load() != 1 {
 		t.Errorf("installation lookups = %d, token mints = %d; want 1 and 1 (cached)", installCalls.Load(), tokenCalls.Load())
@@ -279,6 +294,9 @@ func TestGiteaNotes(t *testing.T) {
 	var replied, commented map[string]any
 	var repliedPath string
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/repos/o/r", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"full_name":"o/r","default_branch":"trunk"}`)
+	})
 	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `[
 			{"id":1,"user":{"login":"agent-nexus"},"state":"COMMENT","body":"## Summary","comments_count":1,"submitted_at":"2026-01-01T00:00:01Z"},
@@ -398,6 +416,9 @@ func TestGitHubNotes(t *testing.T) {
 // Without the read:issue scope, review threads are still listed.
 func TestGiteaNotesWithoutIssueScope(t *testing.T) {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/repos/o/r", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"full_name":"o/r","default_branch":"trunk"}`)
+	})
 	mux.HandleFunc("GET /api/v1/repos/o/r/pulls/3/reviews", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `[{"id":1,"user":{"login":"agent-nexus"},"state":"COMMENT","body":"","comments_count":1,"submitted_at":"2026-01-01T00:00:01Z"}]`)
 	})

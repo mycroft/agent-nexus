@@ -278,6 +278,21 @@ func getPages[T any](ctx context.Context, g *GitHub, auth func(*http.Request), p
 	}
 }
 
+// DefaultBranch implements Forge.
+func (g *GitHub) DefaultBranch(ctx context.Context, repo Repo) (string, error) {
+	auth, err := g.repoAuth(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := g.api.do(ctx, http.MethodGet, "/repos/"+repo.String(), auth, nil, &r); err != nil {
+		return "", fmt.Errorf("github: %w", err)
+	}
+	return r.DefaultBranch, nil
+}
+
 // ListReviews implements Forge.
 func (g *GitHub) ListReviews(ctx context.Context, repo Repo, number int) ([]Review, error) {
 	auth, err := g.repoAuth(ctx, repo)

@@ -34,12 +34,23 @@ func TestLoadDefaults(t *testing.T) {
 	if c, err := Load(); err != nil || c.LLMThinkingBudget != 6144 {
 		t.Errorf("LLM_THINKING_BUDGET = %d, %v", c.LLMThinkingBudget, err)
 	}
+	if c.ZulipEnabled() {
+		t.Error("Zulip enabled without its settings")
+	}
+	t.Setenv("ZULIP_URL", "https://zulip.example.com/")
+	t.Setenv("ZULIP_BOT_EMAIL", "agent-nexus-bot@zulip.example.com")
+	t.Setenv("ZULIP_BOT_API_KEY", "key")
+	t.Setenv("ZULIP_WEBHOOK_TOKEN", "token")
+	if c, err := Load(); err != nil || !c.ZulipEnabled() || c.ZulipURL != "https://zulip.example.com" {
+		t.Errorf("Zulip: %+v, %v", c, err)
+	}
 }
 
 func TestLoadErrors(t *testing.T) {
 	for name, env := range map[string]map[string]string{
 		"partial gitea":   {"GITEA_TOKEN": ""},
 		"partial github":  {"GITHUB_APP_ID": "12"},
+		"partial zulip":   {"ZULIP_URL": "https://zulip.example.com", "ZULIP_BOT_EMAIL": "bot@example.com"},
 		"no forge":        {"GITEA_URL": "", "GITEA_USER": "", "GITEA_TOKEN": ""},
 		"bad duration":    {"JOB_TIMEOUT": "soon"},
 		"zero workers":    {"LLM_CONCURRENCY": "0"},

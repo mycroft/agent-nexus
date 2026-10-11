@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,11 +20,15 @@ import (
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/review"
+	"github.com/mycroft/agent-nexus/internal/zulip"
 )
 
 const (
 	maxBodyBytes = 64 << 10
-	forgeTimeout = 30 * time.Second
+	// maxZulipBodyBytes fits a long message, sent both as Markdown and
+	// rendered.
+	maxZulipBodyBytes = 1 << 20
+	forgeTimeout      = 30 * time.Second
 )
 
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
@@ -35,7 +40,11 @@ type Server struct {
 	Forges        []forge.Forge
 	AllowedOwners []string
 	Keys          *auth.Keys
-	Logger        *slog.Logger
+	// Zulip, if set, receives the outgoing webhook of the Zulip bot,
+	// authenticated by ZulipToken.
+	Zulip      *zulip.Client
+	ZulipToken string
+	Logger     *slog.Logger
 }
 
 // Handler returns the API routes.
@@ -47,6 +56,10 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("POST /v1/events/pr-review", s.Keys.Middleware(http.HandlerFunc(s.prReviewEvent)))
 	mux.Handle("POST /v1/events/pr-comment", s.Keys.Middleware(http.HandlerFunc(s.prCommentEvent)))
+	if s.Zulip != nil {
+		// Zulip authenticates with a token in the body, not an API key.
+		mux.HandleFunc("POST /v1/events/zulip", s.zulipEvent)
+	}
 	mux.Handle("GET /v1/jobs", s.Keys.Middleware(http.HandlerFunc(s.listJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.Keys.Middleware(http.HandlerFunc(s.getJob)))
 	mux.Handle("GET /v1/jobs/{id}/steps", s.Keys.Middleware(http.HandlerFunc(s.getSteps)))
@@ -184,6 +197,44 @@ func (s *Server) prCommentEvent(w http.ResponseWriter, r *http.Request) {
 			PR:    body.PR,
 		},
 	})
+}
+
+// zulipEvent receives the Zulip bot's outgoing webhook: a mention of the
+// bot, or a direct message to it. It queues a pass over the message's
+// conversation and acknowledges the message with a reaction. The answer is
+// posted by the job, so Zulip is told no response is coming.
+func (s *Server) zulipEvent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var ev zulip.Outgoing
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxZulipBodyBytes)).Decode(&ev); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(ev.Token), []byte(s.ZulipToken)) != 1 {
+		writeError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	conv, err := zulip.ConversationOf(ev.Message, ev.BotEmail)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	log := s.Logger.With("conversation", conv.String(), "message", ev.Message.ID, "sender", ev.Message.SenderEmail)
+	job, created, err := s.Queue.Enqueue(ctx, review.ChatJob(conv, ev.Message.ID, ev.Message.SenderFullName))
+	if err != nil {
+		log.ErrorContext(ctx, "enqueue chat question", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not enqueue the question")
+		return
+	}
+	if created {
+		log.InfoContext(ctx, "chat question queued", "job", job.ID)
+		reactCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := s.Zulip.React(reactCtx, ev.Message.ID, review.ChatSeenEmoji); err != nil {
+			log.WarnContext(ctx, "acknowledge chat question", "error", err)
+		}
+		cancel()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"response_not_required": true})
 }
 
 func (s *Server) enqueue(w http.ResponseWriter, r *http.Request, log *slog.Logger, what string, nj jobs.NewJob) {

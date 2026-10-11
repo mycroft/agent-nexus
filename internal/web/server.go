@@ -310,15 +310,18 @@ func theme(r *http.Request) string {
 
 // jobView is a job as the templates show it.
 type jobView struct {
-	ID           int64
-	Kind         string
-	Status       jobs.Status
-	Forge        string
-	Repo         string // owner/name
-	PR           int
-	PRURL        string
-	HeadSHA      string
-	Forced       bool
+	ID      int64
+	Kind    string
+	Status  jobs.Status
+	Forge   string
+	Repo    string // owner/name
+	PR      int
+	PRURL   string
+	HeadSHA string
+	Forced  bool
+	// Label names what a job without a pull request is about, such as a
+	// chat conversation.
+	Label        string
 	APIKeyName   string
 	CreatedAt    time.Time
 	StartedAt    *time.Time
@@ -343,8 +346,12 @@ func newJobView(j jobs.JobSummary, forgeURLs map[string]string) jobView {
 		PR      int    `json:"pr"`
 		HeadSHA string `json:"head_sha"`
 		Force   bool   `json:"force"`
+		Label   string `json:"label"`
 	}
-	if json.Unmarshal(j.Payload, &payload) == nil && payload.Owner != "" {
+	if json.Unmarshal(j.Payload, &payload) == nil {
+		v.Label = payload.Label
+	}
+	if payload.Owner != "" {
 		v.Forge, v.PR, v.HeadSHA, v.Forced = payload.Forge, payload.PR, payload.HeadSHA, payload.Force
 		v.Repo = payload.Owner + "/" + payload.Repo
 		if root := forgeURLs[payload.Forge]; root != "" {
@@ -376,6 +383,7 @@ var outcomeLabels = map[string]string{
 	"superseded":        "newer commit",
 	"already_posted":    "already posted",
 	"nothing_to_answer": "nothing to answer",
+	"no_repository":     "asked which repository",
 	"approved":          "approved",
 }
 
@@ -402,6 +410,8 @@ func (v jobView) Outcome() string {
 		return fmt.Sprintf("%s · %d finding%s", str("verdict"), num("findings"), plural(num("findings")))
 	case str("outcome") == "answered" && approved:
 		return fmt.Sprintf("%d answered · approved", num("answered"))
+	case str("outcome") == "answered" && str("repo") != "":
+		return fmt.Sprintf("%d answered · %s", num("answered"), str("repo"))
 	case str("outcome") == "answered":
 		return fmt.Sprintf("%d answered", num("answered"))
 	default:
