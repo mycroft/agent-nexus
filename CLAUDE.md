@@ -31,7 +31,7 @@ The flow is event → job → handler → agent → forge.
   - `renderHistory` feeds the same discussion to later reviews.
 - **`internal/review` (chat):** the `chat_question` handler (`Chat`), for questions asked on Zulip. `POST /v1/events/zulip` receives the bot's outgoing webhook (authenticated by the token in its body, not an API key), queues a pass over the message's conversation with `KeepRunning`, and reacts 👀.
   - `pendingChatAsks` finds the other users' messages mentioning the bot (every one, in a direct conversation) that the bot has not reacted ✅ to.
-  - `target` picks the repository or pull request from the first `owner/name[#n]` or forge link in the asks, the earlier messages, the topic, then the channel name. A pull request gets the discussion workspace (`prepare`); a repository gets a branch workspace (`prepareBranch`: the default branch's head, no diff, `tools.Commit`).
+  - `target` picks the repository or pull request from the first `owner/name[#n]` or forge link in the asks, the earlier messages, the topic, then the channel name. A pull request gets the discussion workspace (`prepare`); a repository gets a branch workspace (`prepareBranch`: the default branch's head, no diff, `tools.Commit`). With neither, the agent still runs, on a bare workspace (`bareWorkspace`): no repository, and the chart and web tools only when `FETCH_ALLOWED_HOSTS` is set. The skill then asks which repository a code question is about.
   - Answers follow `skills/chat`. One answer covers every pending question, then they get ✅.
 - **`internal/zulip`:** a hand-rolled Zulip client (`History`, `Send`, `React`) and the outgoing webhook payload. `zuliptest.Fake` is an in-memory Zulip server for tests.
 - **`internal/agent`:** the tool-calling loop. It records the transcript and elides old tool output as the conversation nears the context window. It also stops investigating when the context's deadline (`JOB_TIMEOUT`) leaves time only for another turn and the final answer, each estimated at the slowest turn so far, so a slow model yields a shorter review, not a timed-out job. `Finish` likewise skips its remaining cache-friendly retries for the schema-constrained fallback (no thinking, always parses) when no time is left for another call. In the last three turns, by the turn limit or the deadline, the loop tells the model how many it has left (`turnsLeftNote`), so it concludes rather than being cut short.
@@ -62,7 +62,7 @@ The flow is event → job → handler → agent → forge.
 - **Model-chosen URLs never carry free text.**
   - A chart repository URL must appear verbatim in the base commit (`Repo.Contains`).
   - A page host or an image name must appear there as a whole token (`Repo.ContainsBounded`); pages take no query string.
-  - Otherwise, the host must be on `FETCH_ALLOWED_HOSTS`.
+  - Otherwise, the host must be on `FETCH_ALLOWED_HOSTS`. A bare workspace has no base commit, so only these hosts count.
   - Another repository of the forge must be the reviewed one, or appear in the base commit as `<forge host>/<owner>/<name>` (`openRepo`). It is read with the forge's credentials only: never add credentials for other hosts to agent-nexus. Those belong in a proxy or an MCP server outside it.
   - Every connection goes through `remote.NewHTTPClient`, which refuses non-public addresses at dial time, redirects included.
   - Never send credentials to these hosts, and never give the agent a fetcher without these guards.

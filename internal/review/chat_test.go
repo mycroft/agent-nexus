@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -302,16 +303,45 @@ func TestChatWithoutRepository(t *testing.T) {
 	q := f.ask(alice, "@**agent-nexus** what does charts/apps/zulip.go do in other/repo?")
 	f.zulip.Add(zuliptest.StreamMessage(3, "dev", "elsewhere", bob, "o/calc"))
 
+	// Without tools, the model answers at once.
+	raw, _ := json.Marshal(map[string]string{"reply": "Which repository is it in? I can read those of o."})
+	f.llm.replies = []llm.Message{
+		{Role: "assistant", Content: "I need the repository."},
+		{Role: "assistant", Content: string(raw)},
+	}
+
 	job := f.run(t, q)
-	if job.Status != jobs.Succeeded || !strings.Contains(string(job.Result), "no_repository") {
+	if job.Status != jobs.Succeeded || !strings.Contains(string(job.Result), `"outcome":"answered"`) || strings.Contains(string(job.Result), `"repo"`) {
 		t.Fatalf("job = %s %s %s", job.Status, job.Error, job.Result)
 	}
 	sent := f.zulip.Sent()
-	if len(sent) != 1 || !strings.Contains(sent[0].Content, "Which repository is this about?") || !strings.Contains(sent[0].Content, "repositories of o.") {
+	if len(sent) != 1 || !strings.Contains(sent[0].Content, "Which repository is it in?") {
 		t.Errorf("sent = %+v", sent)
 	}
-	if len(f.llm.requests) != 0 {
-		t.Errorf("the model was called %d times", len(f.llm.requests))
+	if !f.zulip.Message(q.ID).ReactedBy(zuliptest.Bot.ID, chatAnsweredEmoji) {
+		t.Error("the question is not marked answered")
+	}
+
+	req := f.llm.requests[0]
+	system, user := req.Messages[0].Content, req.Messages[1].Content
+	for _, want := range []string{
+		"names no repository or pull request", "ask which one instead of guessing",
+		"`owner/name#<number>` for a pull request", "You can read the repositories of o.",
+		"You have no tools: reply in plain text.",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system prompt lacks %q:\n%s", want, system)
+		}
+	}
+	if !strings.HasPrefix(user, "## The conversation\n\n") || strings.Contains(user, "<repository>") {
+		t.Errorf("user prompt:\n%s", user)
+	}
+	if len(req.Tools) != 0 {
+		t.Errorf("tools = %v, want none", req.Tools)
+	}
+	final := f.llm.requests[1].Messages
+	if instruction := final[len(final)-1].Content; !strings.Contains(instruction, "ask which one instead") || strings.Contains(instruction, "path:line") {
+		t.Errorf("final instruction:\n%s", instruction)
 	}
 }
 

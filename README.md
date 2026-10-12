@@ -34,7 +34,8 @@ workflow ──POST /v1/events/pr-review──▶ API (API key, owner allowlist,
   and comments that mention `@agent-nexus`. Its later reviews take the
   discussion into account (see [Discussion](#discussion)).
 - **Answers questions on Zulip.** Mention the bot in a channel, or send it
-  a direct message, about a repository or a PR (see [Zulip](#zulip)).
+  a direct message, about a repository, a PR, or anything else (see
+  [Zulip](#zulip)).
 - **Comment or verdict, per repository.** By default a review is a plain
   comment. Repositories in verdict mode get an approval, a comment or a
   change request instead (see [Review modes](#review-modes)).
@@ -302,7 +303,8 @@ scope; without it, agent-nexus sees review threads only.
 ## Zulip
 
 With a Zulip bot configured, agent-nexus answers questions about the
-repositories and PRs it can read on its forges. In a channel, mention the
+repositories and PRs it can read on its forges, and questions about
+nothing in particular. In a channel, mention the
 bot (`@**agent-nexus**`); in a direct message, just ask. It answers in the
 same topic or conversation, mentioning the askers in a channel.
 
@@ -322,11 +324,14 @@ The first reference found wins:
 - `owner/name`, or a link to the repository or a file in it, is the
   repository. agent-nexus reads the head of its default branch, with the
   same read-only tools, minus `get_file_diff`.
+- With no reference, agent-nexus has no code to read. It asks which
+  repository a question about code is about, and answers other questions
+  from what the model knows. Its chart and web tools then read only the
+  hosts on `FETCH_ALLOWED_HOSTS`, since no base branch lists others.
 
 Only owners in `ALLOWED_OWNERS` count. `owner/name` refers to the first
 configured forge (Gitea when both are); link a repository of the other
-one. A question that names nothing gets asked which repository it is
-about. Naming a topic after a repository or PR (`mycroft/k8s-home#1685`)
+one. Naming a topic after a repository or PR (`mycroft/k8s-home#1685`)
 sets it for every question in that topic.
 
 **One pass per conversation.** Like a PR discussion, a pass reads the

@@ -63,9 +63,10 @@ func ChatJob(conv zulip.Conversation, messageID int64, asker string) jobs.NewJob
 	}
 }
 
-// Chat answers the questions asked to the bot on Zulip about a repository
-// or a pull request, with the Reviewer's tools and forges. It never writes
-// to a forge.
+// Chat answers the questions asked to the bot on Zulip, with the
+// Reviewer's tools and forges. A conversation naming a repository or a pull
+// request is answered from it; others get a bare workspace, without a
+// repository. It never writes to a forge.
 type Chat struct {
 	Reviewer *Reviewer
 	Zulip    *zulip.Client
@@ -101,26 +102,25 @@ func (c *Chat) Handle(ctx context.Context, job *jobs.Job, run *jobs.Run) (jobs.R
 	}
 
 	data := map[string]any{"outcome": "answered", "answered": len(asks)}
-	var text string
-	if t, ok := c.target(history, asks, me, conv); ok {
+	var t *chatTarget
+	if found, ok := c.target(history, asks, me, conv); ok {
+		t = &found
 		data["repo"] = t.String()
-		record := func(st agent.Step) {
-			run.Record(ctx, jobs.Step{
-				Role: st.Role, ToolName: st.ToolName, Content: st.Content,
-				PromptTokens: st.PromptTokens, CompletionTokens: st.CompletionTokens,
-			})
+	}
+	record := func(st agent.Step) {
+		run.Record(ctx, jobs.Step{
+			Role: st.Role, ToolName: st.ToolName, Content: st.Content,
+			PromptTokens: st.PromptTokens, CompletionTokens: st.CompletionTokens,
+		})
+	}
+	text, err := c.answer(ctx, t, conv, history, asks, me, record)
+	if err != nil {
+		// A cancelled job was interrupted by a shutdown, and runs again on
+		// restart: it did not fail.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			c.reportFailure(ctx, conv, asks, job.ID)
 		}
-		if text, err = c.answer(ctx, t, conv, history, asks, me, record); err != nil {
-			// A cancelled job was interrupted by a shutdown, and runs
-			// again on restart: it did not fail.
-			if !errors.Is(ctx.Err(), context.Canceled) {
-				c.reportFailure(ctx, conv, asks, job.ID)
-			}
-			return jobs.Result{}, err
-		}
-	} else {
-		data["outcome"] = "no_repository"
-		text = c.whichRepository()
+		return jobs.Result{}, err
 	}
 	if _, err := c.Zulip.Send(ctx, conv, chatReplyBody(asks, text, job.ID, conv.Direct())); err != nil {
 		return jobs.Result{}, err
@@ -267,13 +267,14 @@ func forgeLinkPattern(f forge.Forge) (*regexp.Regexp, error) {
 	return regexp.Compile(`(?i)(?:^|[^A-Za-z0-9_.-])(?:https?://)?` + regexp.QuoteMeta(root) + `/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:/pulls?/(\d+))?`)
 }
 
-// whichRepository is the answer to a question that names no repository.
-func (c *Chat) whichRepository() string {
-	s := "Which repository is this about? Name it as `owner/name`, or `owner/name#<number>` for a pull request, or paste its link; a topic named after it works too."
+// namingHint tells the model how a question names a repository, for it to
+// ask which one a question is about.
+func (c *Chat) namingHint() string {
+	s := "They can name it as `owner/name`, or `owner/name#<number>` for a pull request, or paste its link; a topic named after it works too."
 	if len(c.Forges) > 1 {
-		s += fmt.Sprintf(" `owner/name` is on %s: link a repository of another forge.", c.Forges[0].Name())
+		s += fmt.Sprintf(" `owner/name` is on %s: a repository of another forge needs a link.", c.Forges[0].Name())
 	}
-	return s + fmt.Sprintf(" I can read the repositories of %s.", strings.Join(c.AllowedOwners, ", "))
+	return s + fmt.Sprintf(" You can read the repositories of %s.", strings.Join(c.AllowedOwners, ", "))
 }
 
 // chatSubject is a chat target ready for the agent: its workspace, and
@@ -284,10 +285,14 @@ type chatSubject struct {
 	discussion string
 }
 
-// prepareTarget fetches what t names. When the forge does not know it,
-// the returned string is the answer saying so.
-func (c *Chat) prepareTarget(ctx context.Context, t chatTarget) (chatSubject, string, error) {
+// prepareTarget fetches what t names, or returns a bare workspace when t
+// is nil. When the forge does not know t, the returned string is the
+// answer saying so.
+func (c *Chat) prepareTarget(ctx context.Context, t *chatTarget) (chatSubject, string, error) {
 	r := c.Reviewer
+	if t == nil {
+		return chatSubject{ws: r.bareWorkspace()}, "", nil
+	}
 	if t.pr == 0 {
 		ws, err := r.prepareBranch(ctx, t.forge, t.repo)
 		if errors.Is(err, forge.ErrNotFound) {
@@ -309,12 +314,13 @@ func (c *Chat) prepareTarget(ctx context.Context, t chatTarget) (chatSubject, st
 	if err != nil {
 		return chatSubject{}, "", err
 	}
-	return chatSubject{ws: ws, pr: &pr, discussion: r.prDiscussion(ctx, t)}, "", nil
+	return chatSubject{ws: ws, pr: &pr, discussion: r.prDiscussion(ctx, *t)}, "", nil
 }
 
 // answer runs the agent on the conversation and returns its reply. A
-// repository or pull request it cannot read is answered as such.
-func (c *Chat) answer(ctx context.Context, t chatTarget, conv zulip.Conversation, history, asks []zulip.Message, me zulip.Me, record func(agent.Step)) (string, error) {
+// repository or pull request it cannot read is answered as such; a nil t
+// is no repository.
+func (c *Chat) answer(ctx context.Context, t *chatTarget, conv zulip.Conversation, history, asks []zulip.Message, me zulip.Me, record func(agent.Step)) (string, error) {
 	r := c.Reviewer
 	s, missing, err := c.prepareTarget(ctx, t)
 	if err != nil || missing != "" {
@@ -330,14 +336,15 @@ func (c *Chat) answer(ctx context.Context, t chatTarget, conv zulip.Conversation
 		Record:        record,
 		Logger:        r.Logger,
 	}
-	system := chatSystemPrompt(c.Skill.Body, t, ws)
+	toolset := ws.tools()
+	system := c.systemPrompt(t, ws, len(toolset) > 0)
 	user := chatUserPrompt(t, s.pr, ws, s.discussion, conv, history, asks, me)
-	session, err := runner.Run(ctx, system, user, ws.tools())
+	session, err := runner.Run(ctx, system, user, toolset)
 	if err != nil {
 		return "", fmt.Errorf("agent: %w", err)
 	}
 	var reply string
-	err = session.Finish(ctx, chatFinalInstruction(session.TurnLimitReached),
+	err = session.Finish(ctx, chatFinalInstruction(session.TurnLimitReached, t != nil),
 		llm.JSONSchema{Name: "chat_reply", Schema: replySchema},
 		func(raw []byte) error {
 			var out struct {
@@ -371,23 +378,26 @@ func (r *Reviewer) prDiscussion(ctx context.Context, t chatTarget) string {
 	return ""
 }
 
-func chatSystemPrompt(skillBody string, t chatTarget, ws *workspace) string {
-	about := t.repo.String()
-	if t.pr > 0 {
-		about = fmt.Sprintf("pull request #%d of %s", t.pr, t.repo)
-	}
+// systemPrompt is the skill and the situation: what the conversation is
+// about (t, or nothing when nil) and the tools the agent has.
+func (c *Chat) systemPrompt(t *chatTarget, ws *workspace, hasTools bool) string {
 	var b strings.Builder
-	b.WriteString(skillBody)
-	fmt.Fprintf(&b, `
-
----
-
-## Your situation
-
-You are agent-nexus, answering a question asked in Zulip, the team chat, about %s on %s.
-%s You may call several tools in one turn.
-When you are done investigating, reply in plain text without calling any tool. You will then be asked for your final answer as JSON.
-`, about, t.forge.Name(), ws.toolsSentence())
+	b.WriteString(c.Skill.Body)
+	b.WriteString("\n\n---\n\n## Your situation\n\n")
+	switch {
+	case t == nil:
+		fmt.Fprintf(&b, "You are agent-nexus, answering a question asked in Zulip, the team chat. The conversation names no repository or pull request, so you have no code to read. If a question is about code, a repository or a pull request, ask which one instead of guessing. %s\n", c.namingHint())
+	case t.pr > 0:
+		fmt.Fprintf(&b, "You are agent-nexus, answering a question asked in Zulip, the team chat, about pull request #%d of %s on %s.\n", t.pr, t.repo, t.forge.Name())
+	default:
+		fmt.Fprintf(&b, "You are agent-nexus, answering a question asked in Zulip, the team chat, about %s on %s.\n", t.repo, t.forge.Name())
+	}
+	if hasTools {
+		fmt.Fprintf(&b, "%s You may call several tools in one turn.\nWhen you are done investigating, reply in plain text without calling any tool.", ws.toolsSentence())
+	} else {
+		b.WriteString("You have no tools: reply in plain text.")
+	}
+	b.WriteString(" You will then be asked for your final answer as JSON.\n")
 	if ws.guidance != "" {
 		fmt.Fprintf(&b, "\n## Repository guidance\n\nThe repository's %s, read from %s, says:\n\n<repository-guidance>\n%s\n</repository-guidance>\n",
 			ws.guidanceName, guidanceSource(ws), truncate(ws.guidance, maxGuidance))
@@ -402,9 +412,10 @@ func guidanceSource(ws *workspace) string {
 	return "the base branch"
 }
 
-func chatUserPrompt(t chatTarget, pr *forge.PR, ws *workspace, background string, conv zulip.Conversation, history, asks []zulip.Message, me zulip.Me) string {
+func chatUserPrompt(t *chatTarget, pr *forge.PR, ws *workspace, background string, conv zulip.Conversation, history, asks []zulip.Message, me zulip.Me) string {
 	var b strings.Builder
-	if pr != nil {
+	switch {
+	case pr != nil:
 		fmt.Fprintf(&b, "<pull-request>\nRepository: %s (%s)\nPull request: #%d: %s\nAuthor: %s\nState: %s\nBase: %s @ %s; head: %s\n",
 			t.repo, t.forge.Name(), pr.Number, pr.Title, pr.Author, prState(*pr), pr.BaseRef, short(ws.baseSHA), short(ws.headSHA))
 		if body := strings.TrimSpace(pr.Body); body != "" {
@@ -417,11 +428,14 @@ func chatUserPrompt(t chatTarget, pr *forge.PR, ws *workspace, background string
 		if background != "" {
 			fmt.Fprintf(&b, "\nFor background, the discussion on the pull request, your reviews included:\n\n<discussion>\n%s</discussion>\n", background)
 		}
-	} else {
+	case t != nil:
 		fmt.Fprintf(&b, "<repository>\nRepository: %s (%s)\nBranch: %s @ %s\n</repository>\n", t.repo, t.forge.Name(), ws.branch, short(ws.headSHA))
 	}
 
-	b.WriteString("\n## The conversation\n\n")
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	b.WriteString("## The conversation\n\n")
 	if conv.Direct() {
 		b.WriteString("In direct messages with you.\n")
 	} else {
@@ -473,14 +487,20 @@ func chatConversation(history []zulip.Message, me zulip.Me, pending map[int64]bo
 	return strings.Join(entries, "")
 }
 
-func chatFinalInstruction(turnLimitReached bool) string {
+// chatFinalInstruction asks for the answer. Without a repository (code is
+// false), there is no code to cite.
+func chatFinalInstruction(turnLimitReached, code bool) string {
 	var b strings.Builder
 	if turnLimitReached {
 		b.WriteString("You have reached the investigation limit. ")
 	}
-	b.WriteString(`Now write your answer as JSON: {"reply": "<markdown>"}.
-- Answer what was asked; quote the code you rely on and cite path:line.
-- Zulip Markdown: no headings and no HTML; use lists, ` + "`code`" + ` and fenced code blocks.`)
+	b.WriteString(`Now write your answer as JSON: {"reply": "<markdown>"}.` + "\n")
+	if code {
+		b.WriteString("- Answer what was asked; quote the code you rely on and cite path:line.\n")
+	} else {
+		b.WriteString("- Answer what was asked. If it is about code, a repository or a pull request, ask which one instead.\n")
+	}
+	b.WriteString("- Zulip Markdown: no headings and no HTML; use lists, `code` and fenced code blocks.")
 	return b.String()
 }
 

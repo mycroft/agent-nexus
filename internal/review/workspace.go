@@ -20,8 +20,10 @@ import (
 // workspace is a pull request ready for the agent: the repository at the
 // head commit, the diff against the merge-base, and the base branch's
 // repository guidance. A branch workspace (prepareBranch) is a branch's
-// head commit instead, without a diff.
+// head commit instead, without a diff. A bare workspace (bareWorkspace)
+// has no repository at all.
 type workspace struct {
+	// repo is nil in a bare workspace.
 	repo *gitrepo.Repo
 	// branch is the branch of a branch workspace, "" for a pull request.
 	branch        string
@@ -115,6 +117,16 @@ func (r *Reviewer) prepareBranch(ctx context.Context, f forge.Forge, repoID forg
 	return w, nil
 }
 
+// bareWorkspace is a workspace without a repository, for questions that
+// name none. With no base commit to match references against, the URL
+// policies admit only the hosts on fetchHosts.
+func (r *Reviewer) bareWorkspace() *workspace {
+	return &workspace{
+		byPath: map[string]*diff.File{}, contextTokens: r.ContextTokens,
+		charts: r.Charts, remote: r.Remote, fetchHosts: r.FetchHosts,
+	}
+}
+
 // newWorkspace returns a workspace without a diff, with the repository
 // guidance of baseSHA.
 func (r *Reviewer) newWorkspace(ctx context.Context, f forge.Forge, repoID forge.Repo, repo *gitrepo.Repo, baseSHA, headSHA string) *workspace {
@@ -145,6 +157,9 @@ func (w *workspace) fileDiff(path string) (string, bool) {
 }
 
 func (w *workspace) tools() []tools.Tool {
+	if w.repo == nil {
+		return w.bareTools()
+	}
 	out := tools.Repo(w.repo, w.headSHA, w.fileDiff)
 	if w.branch != "" {
 		out = tools.Commit(w.repo, w.headSHA, "the head of the "+w.branch+" branch")
@@ -161,8 +176,28 @@ func (w *workspace) tools() []tools.Tool {
 	return out
 }
 
-// toolsSentence tells the model which tools it has.
+// bareTools are the tools of a bare workspace: those reading the hosts on
+// fetchHosts, if there are any.
+func (w *workspace) bareTools() []tools.Tool {
+	if len(w.fetchHosts) == 0 {
+		return nil
+	}
+	var out []tools.Tool
+	if w.charts != nil {
+		out = append(out, tools.Charts(w.charts, w.chartPolicy)...)
+	}
+	if w.remote != nil {
+		out = append(out, tools.Web(w.remote, tools.WebPolicy{Page: w.pagePolicy, Image: w.imagePolicy})...)
+	}
+	return out
+}
+
+// toolsSentence tells the model which tools it has. It is "" for a bare
+// workspace without tools.
 func (w *workspace) toolsSentence() string {
+	if w.repo == nil {
+		return w.bareToolsSentence()
+	}
 	s := "You have read-only tools over the repository at the pull request's head commit: read_file, list_dir, grep, git_log and get_file_diff."
 	base := "base branch"
 	if w.branch != "" {
@@ -179,6 +214,20 @@ func (w *workspace) toolsSentence() string {
 		s += " repo_log and repo_read read other repositories of this forge that the " + base + " references, such as the source of a self-built image or chart."
 	}
 	return s
+}
+
+func (w *workspace) bareToolsSentence() string {
+	var parts []string
+	if len(w.fetchHosts) > 0 && w.charts != nil {
+		parts = append(parts, "chart_files, chart_read and chart_diff read published Helm chart versions from their chart repositories")
+	}
+	if len(w.fetchHosts) > 0 && w.remote != nil {
+		parts = append(parts, "fetch_url reads their pages, and release_notes the GitHub release notes of a container image on their registries")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("You have read-only tools that read from these hosts only: %s. %s.", strings.Join(w.fetchHosts, ", "), strings.Join(parts, "; "))
 }
 
 // repoNameChars are those of an owner or repository name: the class
@@ -244,6 +293,9 @@ func (w *workspace) pagePolicy(ctx context.Context, rawURL string) error {
 	if w.allowedHost(host) {
 		return nil
 	}
+	if w.repo == nil {
+		return fmt.Errorf("%s is not an allowed host: without a repository, only the allowed hosts can be read", host)
+	}
 	found, err := w.repo.ContainsBounded(ctx, w.baseSHA, host, hostChars)
 	if err != nil {
 		return err
@@ -263,6 +315,9 @@ func (w *workspace) imagePolicy(ctx context.Context, image string) error {
 	}
 	if w.allowedHost(host) {
 		return nil
+	}
+	if w.repo == nil {
+		return fmt.Errorf("%s is not an allowed host: without a repository, only images on the allowed hosts can be looked up", host)
 	}
 	found, err := w.repo.ContainsBounded(ctx, w.baseSHA, image, imageChars)
 	if err != nil {
@@ -289,6 +344,9 @@ func (w *workspace) chartPolicy(ctx context.Context, repoURL string) error {
 	}
 	if w.allowedHost(host) {
 		return nil
+	}
+	if w.repo == nil {
+		return fmt.Errorf("%s is not an allowed host: without a repository, only chart repositories on the allowed hosts can be read", host)
 	}
 	found, err := w.repo.Contains(ctx, w.baseSHA, norm)
 	if err != nil {

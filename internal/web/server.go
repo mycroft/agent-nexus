@@ -383,8 +383,9 @@ var outcomeLabels = map[string]string{
 	"superseded":        "newer commit",
 	"already_posted":    "already posted",
 	"nothing_to_answer": "nothing to answer",
-	"no_repository":     "asked which repository",
 	"approved":          "approved",
+	// Chat jobs from before questions without a repository were answered.
+	"no_repository": "asked which repository",
 }
 
 // Outcome is the job's result in a few words.
