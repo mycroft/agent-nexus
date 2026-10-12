@@ -37,6 +37,13 @@ func TestLoadDefaults(t *testing.T) {
 	if c.ZulipEnabled() {
 		t.Error("Zulip enabled without its settings")
 	}
+	if c.MCPConfig != "" {
+		t.Errorf("MCPConfig = %q, want none", c.MCPConfig)
+	}
+	t.Setenv("MCP_CONFIG", "/etc/agent-nexus/mcp/config.yaml")
+	if c, err := Load(); err != nil || c.MCPConfig != "/etc/agent-nexus/mcp/config.yaml" {
+		t.Errorf("MCP_CONFIG = %q, %v", c.MCPConfig, err)
+	}
 	t.Setenv("ZULIP_URL", "https://zulip.example.com/")
 	t.Setenv("ZULIP_BOT_EMAIL", "agent-nexus-bot@zulip.example.com")
 	t.Setenv("ZULIP_BOT_API_KEY", "key")

@@ -36,6 +36,9 @@ type Config struct {
 	// SkillsDir, if set, replaces the embedded skills (for iterating on a
 	// skill without rebuilding).
 	SkillsDir string
+	// MCPConfig is the path of the MCP servers' YAML configuration, parsed
+	// by mcp.LoadConfig. Empty configures none.
+	MCPConfig string
 
 	// APIKeys is the raw "name=key,name=key" list accepted by the event API.
 	APIKeys string
@@ -101,6 +104,7 @@ func Load() (Config, error) {
 		ChartCacheDir:       getEnv("CHART_CACHE_DIR", "charts"),
 		FetchAllowedHosts:   splitList(os.Getenv("FETCH_ALLOWED_HOSTS")),
 		SkillsDir:           os.Getenv("SKILLS_DIR"),
+		MCPConfig:           os.Getenv("MCP_CONFIG"),
 		APIKeys:             os.Getenv("API_KEYS"),
 		AllowedOwners:       splitList(os.Getenv("ALLOWED_OWNERS")),
 		ReviewModes:         os.Getenv("REVIEW_MODES"),

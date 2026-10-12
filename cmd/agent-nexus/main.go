@@ -45,6 +45,7 @@ const usage = `usage: agent-nexus <command> [flags]
 commands:
   serve     run the HTTP API and the job workers
   review    review one pull request now (see agent-nexus review -h)
+  mcp       list the tools the configured MCP servers give the agent
   version   print the version
 
 Configuration is read from the environment; see README.md.
@@ -61,6 +62,8 @@ func main() {
 		err = serve()
 	case "review":
 		err = reviewOnce(os.Args[2:])
+	case "mcp":
+		err = checkMCP(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -155,6 +158,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err != nil {
 		return nil, err
 	}
+	mcpClients, err := newMCPClients(ctx, cfg.MCPConfig, log)
+	if err != nil {
+		return nil, err
+	}
 	a.reviewer = &review.Reviewer{
 		Forges:          byName,
 		Repos:           repos,
@@ -168,6 +175,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		Charts:          chartFetcher,
 		Remote:          remoteClient,
 		FetchHosts:      cfg.FetchAllowedHosts,
+		MCP:             mcpClients,
 		Logger:          log,
 	}
 	return a, nil

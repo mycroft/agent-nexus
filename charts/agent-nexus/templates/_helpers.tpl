@@ -97,3 +97,34 @@ review.modes as REVIEW_MODES: "repo=mode,repo=mode", in order.
       optional: true
       {{- end }}
 {{- end }}
+
+{{/*
+mcp.servers as the MCP_CONFIG file. A server with a tokenKey reads its
+bearer token from MCP_TOKEN_<NAME>, set from that key of existingSecret.
+*/}}
+{{- define "agent-nexus.mcpConfig" -}}
+{{- $servers := list }}
+{{- range .Values.mcp.servers }}
+{{- if not (and .name .url .tools) }}
+{{- fail (printf "mcp.servers entries need a name, a url and tools, got %v" .) }}
+{{- end }}
+{{- if or (not (regexMatch "^[a-z][a-z0-9]{0,15}$" .name)) (eq .name "mcp") }}
+{{- fail (printf "mcp.servers name %q: want a lowercase letter, then up to 15 lowercase letters or digits, other than mcp" .name) }}
+{{- end }}
+{{- if and .load (not (has .load (list "lazy" "eager"))) }}
+{{- fail (printf "mcp.servers load %q: want lazy or eager" .load) }}
+{{- end }}
+{{- $server := dict "name" .name "url" .url "tools" .tools }}
+{{- with .description }}{{ $_ := set $server "description" . }}{{ end }}
+{{- with .jobs }}{{ $_ := set $server "jobs" . }}{{ end }}
+{{- with .load }}{{ $_ := set $server "load" . }}{{ end }}
+{{- with .timeout }}{{ $_ := set $server "timeout" . }}{{ end }}
+{{- if .tokenKey }}{{ $_ := set $server "tokenEnv" (include "agent-nexus.mcpTokenEnv" .name) }}{{ end }}
+{{- $servers = append $servers $server }}
+{{- end }}
+{{- toYaml (dict "servers" $servers) }}
+{{- end }}
+
+{{- define "agent-nexus.mcpTokenEnv" -}}
+MCP_TOKEN_{{ upper . }}
+{{- end }}

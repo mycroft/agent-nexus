@@ -16,6 +16,7 @@ fullnameOverride: ""
 #   github-app-private-key  PEM private key of the GitHub App (when github.enabled)
 #   zulip-bot-api-key       API key of the Zulip bot (when zulip.enabled)
 #   zulip-webhook-token     token of the Zulip bot's outgoing webhook (when zulip.enabled)
+#   <mcp.servers[].tokenKey> bearer token of that MCP server (optional)
 existingSecret: ""
 
 llm:
@@ -96,6 +97,30 @@ fetch:
   # image registries.
   allowedHosts: []
   #  - charts.example.com
+
+# MCP servers whose tools the agent may call: Kubernetes, Grafana (with
+# Prometheus and Loki), ... Each server holds its own credentials to its
+# backend; agent-nexus only reaches the server, and only calls the tools
+# listed here. See README.md, "MCP servers".
+mcp:
+  servers: []
+  #  # Lowercase letters and digits, other than mcp.
+  #  - name: k8s
+  #    url: http://kubernetes-mcp-server.mcp.svc:8080/mcp
+  #    # Tells the model what the server reads.
+  #    description: the live state of the home Kubernetes cluster, read-only
+  #    # The tools the model may call (path.Match patterns; "*" allows all).
+  #    tools: [pods_list, pods_list_in_namespace, pods_get, pods_log, resources_get, resources_list, events_list]
+  #    # The jobs that get them: chat, review, discussion. Default: chat.
+  #    jobs: [chat]
+  #    # lazy: the prompt names the server, and the model loads its tools
+  #    # when they can help (mcp_tools, mcp_call). eager: its tools are the
+  #    # model's own from the start (k8s_pods_list), each in every prompt.
+  #    load: lazy
+  #    # One tool call. Default: 1m.
+  #    timeout: 1m
+  #    # A key of existingSecret holding a bearer token for the server.
+  #    tokenKey: ""
 # debug, info, warn or error
 logLevel: info
 

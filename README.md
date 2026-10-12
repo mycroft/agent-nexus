@@ -39,6 +39,10 @@ workflow ──POST /v1/events/pr-review──▶ API (API key, owner allowlist,
 - **Comment or verdict, per repository.** By default a review is a plain
   comment. Repositories in verdict mode get an approval, a comment or a
   change request instead (see [Review modes](#review-modes)).
+- **Live state through MCP.** The agent can call the tools of MCP
+  servers, such as Kubernetes or Grafana, limited to the tools and jobs
+  you list. It loads a server's tools when it needs them (see
+  [MCP servers](#mcp-servers)).
 - **A jobs UI.** It shows what runs, the job history, and every step the
   agent took (see [Jobs UI](#jobs-ui)).
 
@@ -50,6 +54,7 @@ which uses the Agent Skills format and is embedded in the binary.
 ```sh
 agent-nexus serve      # HTTP API + workers
 agent-nexus review -forge gitea -repo mycroft/k8s-home -pr 42 -dry-run -transcript
+agent-nexus mcp        # the tools each MCP server gives the agent
 agent-nexus version
 ```
 
@@ -89,6 +94,7 @@ Everything is configured through environment variables.
 | `FETCH_ALLOWED_HOSTS` | | Comma-separated hosts the agent may read from (chart repositories, pages, image registries) besides those the reviewed repository references |
 | `TRANSCRIPT_RETENTION` | `720h` | How long agent transcripts are kept |
 | `SKILLS_DIR` | embedded | Load skills from disk instead |
+| `MCP_CONFIG` | | YAML file of the MCP servers the agent may call (see [MCP servers](#mcp-servers)) |
 | `LOG_LEVEL` | `info` | |
 
 At least one forge must be configured.
@@ -329,6 +335,9 @@ The first reference found wins:
   from what the model knows. Its chart and web tools then read only the
   hosts on `FETCH_ALLOWED_HOSTS`, since no base branch lists others.
 
+Either way, the tools of the [MCP servers](#mcp-servers) that serve chat
+are available too, such as the cluster's live state.
+
 Only owners in `ALLOWED_OWNERS` count. `owner/name` refers to the first
 configured forge (Gitea when both are); link a repository of the other
 one. Naming a topic after a repository or PR (`mycroft/k8s-home#1685`)
@@ -352,6 +361,84 @@ for PR discussions. Answers follow
 repository of `ALLOWED_OWNERS` the forge bot can read. Answers may quote
 private code into the channel they are asked in. agent-nexus never writes
 to a forge from Zulip: to get a review, ask for it on the PR.
+
+## MCP servers
+
+The agent can call the tools of MCP servers: the live state of a
+Kubernetes cluster, Prometheus metrics and Loki logs through Grafana, and
+so on. Each server keeps its own credentials to its backend; agent-nexus
+only reaches the server.
+
+`MCP_CONFIG` names a YAML file listing them. The Helm chart renders
+`mcp.servers` into it.
+
+```yaml
+servers:
+  - name: k8s          # lowercase letters and digits, other than mcp
+    url: http://kubernetes-mcp-server.mcp.svc:8080/mcp
+    description: the live state of the home Kubernetes cluster, read-only
+    tools: [pods_list, pods_list_in_namespace, pods_get, pods_log, events_list, resources_get, resources_list]
+    jobs: [chat]       # chat, review, discussion; default chat
+    load: lazy         # lazy or eager; default lazy
+    timeout: 1m        # one tool call; default 1m
+    tokenEnv: ""       # environment variable holding a bearer token for the server
+```
+
+What the model can reach is limited:
+
+- **Only the listed tools.** `tools` is required: the tools the model may
+  call, as `path.Match` patterns (`"*"` allows all). The others are never
+  offered, and a call to one is refused. The list also bounds what the
+  tools cost in context.
+- **Only the listed jobs.** By default only Zulip answers get a server's
+  tools. PR text is written by whoever opens the PR, so opening a server
+  to reviews or discussions lets that text steer what is read and posted.
+- **Read-only servers.** Run the servers read-only as well:
+  - kubernetes-mcp-server with `--read-only` (`read_only = true` in its
+    TOML configuration), under a ServiceAccount that cannot read Secrets;
+  - mcp-grafana with `--disable-write`.
+- **Data, not instructions.** The model is told that tool output, such
+  as logs and annotations, is data written by others.
+- **Configured connections.** The URL comes from the configuration, so it
+  may be in the cluster. Redirects are not followed. The optional token
+  authenticates agent-nexus to the server, for example mcp-grafana's
+  `--server-auth-token`; it is the only credential agent-nexus holds for
+  it.
+
+`load` sets when the model gets a server's tools:
+
+- **`lazy`** (the default): the prompt only names the server, with its
+  description. The model gets two tools, `mcp_tools` and `mcp_call`.
+  `mcp_tools` connects to a server and lists its tools with their
+  parameters; `mcp_call` calls one. A server costs a line in the prompt
+  until the model loads it, and is not contacted unless it does. A
+  listing over 12 KiB gives the tools without their parameters, which the
+  model then asks for by name.
+- **`eager`**: the job connects when it starts, and the server's tools
+  are the model's own, named `<server>_<tool>` (`k8s_pods_list`). Each
+  request carries their schemas, but the model saves a turn, and
+  llama-server holds its arguments to each tool's schema. It suits a
+  small server used in most conversations.
+
+Either way, the tools the model has never change during a job, so
+llama-server keeps reusing its cached prompt.
+
+Each job opens its own sessions, and lists each server's tools once.
+agent-nexus uses the official Go SDK over Streamable HTTP, so it speaks
+both the 2026-07-28 protocol and the earlier one (`initialize`), which
+servers with sessions use. A server that is down is left out: the job
+runs without its tools, or `mcp_tools` tells the model it is unavailable.
+`agent_nexus_mcp_errors_total` counts it.
+
+To check a configuration, list what each server gives the agent:
+
+```sh
+MCP_CONFIG=mcp.yaml agent-nexus mcp
+```
+
+It prints each allowed tool with its approximate size in tokens, what the
+server costs in each prompt and, when lazy, once loaded, the tools the
+list leaves out, and the patterns that match no tool.
 
 ## API
 
@@ -423,6 +510,7 @@ These are served on `METRICS_ADDR` at `/metrics`:
 | `agent_nexus_llm_tokens_total{type}` | Prompt and completion tokens |
 | `agent_nexus_tool_calls_total{tool,outcome}` | Tool calls: `ok`, `error`, `repeat`, `refused` |
 | `agent_nexus_forge_errors_total{forge}` | Failed forge API requests |
+| `agent_nexus_mcp_errors_total{server}` | MCP servers a job could not open |
 
 For example, to alert on a stuck job, compare
 `agent_nexus_job_oldest_seconds{status="running"}` with `JOB_TIMEOUT`,
@@ -448,6 +536,7 @@ keys:
 - `gitea-token` (when Gitea is enabled)
 - `github-app-private-key` (when GitHub is enabled)
 - `zulip-bot-api-key` and `zulip-webhook-token` (when Zulip is enabled)
+- the `tokenKey` of each MCP server that has one
 
 Everything else lives in [`values.yaml`](charts/agent-nexus/values.yaml).
 The chart fails to render when a required setting is missing.

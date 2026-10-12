@@ -16,6 +16,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/forge"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
+	"github.com/mycroft/agent-nexus/internal/mcp"
 	"github.com/mycroft/agent-nexus/internal/skill"
 	"github.com/mycroft/agent-nexus/internal/zulip"
 )
@@ -336,8 +337,10 @@ func (c *Chat) answer(ctx context.Context, t *chatTarget, conv zulip.Conversatio
 		Record:        record,
 		Logger:        r.Logger,
 	}
-	toolset := ws.tools()
-	system := c.systemPrompt(t, ws, len(toolset) > 0)
+	mcpTools, mcpSentence, closeMCP := r.openMCP(ctx, mcp.JobChat)
+	defer closeMCP()
+	toolset := append(ws.tools(), mcpTools...)
+	system := c.systemPrompt(t, ws, withMCP(ws.toolsSentence(), mcpSentence), len(toolset) > 0)
 	user := chatUserPrompt(t, s.pr, ws, s.discussion, conv, history, asks, me)
 	session, err := runner.Run(ctx, system, user, toolset)
 	if err != nil {
@@ -379,8 +382,9 @@ func (r *Reviewer) prDiscussion(ctx context.Context, t chatTarget) string {
 }
 
 // systemPrompt is the skill and the situation: what the conversation is
-// about (t, or nothing when nil) and the tools the agent has.
-func (c *Chat) systemPrompt(t *chatTarget, ws *workspace, hasTools bool) string {
+// about (t, or nothing when nil) and the tools the agent has, which
+// toolsSentence describes.
+func (c *Chat) systemPrompt(t *chatTarget, ws *workspace, toolsSentence string, hasTools bool) string {
 	var b strings.Builder
 	b.WriteString(c.Skill.Body)
 	b.WriteString("\n\n---\n\n## Your situation\n\n")
@@ -393,7 +397,7 @@ func (c *Chat) systemPrompt(t *chatTarget, ws *workspace, hasTools bool) string 
 		fmt.Fprintf(&b, "You are agent-nexus, answering a question asked in Zulip, the team chat, about %s on %s.\n", t.repo, t.forge.Name())
 	}
 	if hasTools {
-		fmt.Fprintf(&b, "%s You may call several tools in one turn.\nWhen you are done investigating, reply in plain text without calling any tool.", ws.toolsSentence())
+		fmt.Fprintf(&b, "%s You may call several tools in one turn.\nWhen you are done investigating, reply in plain text without calling any tool.", toolsSentence)
 	} else {
 		b.WriteString("You have no tools: reply in plain text.")
 	}

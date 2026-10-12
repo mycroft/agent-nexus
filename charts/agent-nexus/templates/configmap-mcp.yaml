@@ -1,0 +1,11 @@
+{{- if .Values.mcp.servers }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-nexus.fullname" . }}-mcp
+  labels:
+    {{- include "agent-nexus.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- include "agent-nexus.mcpConfig" . | nindent 4 }}
+{{- end }}

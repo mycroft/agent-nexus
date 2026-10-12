@@ -14,6 +14,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/httpclient"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
+	"github.com/mycroft/agent-nexus/internal/mcp"
 )
 
 // DiscussionKind is the job kind answering replies and mentions.
@@ -208,10 +209,12 @@ func (r *Reviewer) answer(ctx context.Context, forgeName string, repoID forge.Re
 		Record:        record,
 		Logger:        r.Logger,
 	}
-	system := discussionSystemPrompt(r.DiscussionSkill.Body, repoID, forgeName, pr, ws.toolsSentence(), ws.guidanceName, ws.guidance)
+	mcpTools, mcpSentence, closeMCP := r.openMCP(ctx, mcp.JobDiscussion)
+	defer closeMCP()
+	system := discussionSystemPrompt(r.DiscussionSkill.Body, repoID, forgeName, pr, withMCP(ws.toolsSentence(), mcpSentence), ws.guidanceName, ws.guidance)
 	findings := findingsSection(review)
 	user := discussionUserPrompt(repoID, forgeName, pr, ws, a, login, history) + findings
-	session, err := runner.Run(ctx, system, user, ws.tools())
+	session, err := runner.Run(ctx, system, user, append(ws.tools(), mcpTools...))
 	if err != nil {
 		return "", nil, fmt.Errorf("agent: %w", err)
 	}

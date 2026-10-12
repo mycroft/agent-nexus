@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `make test` runs `go test -race ./...`. Tests need `git` on the PATH: the gitrepo and review tests build real repositories with `internal/gitrepo/gitrepotest`. Run one test with `go test -race ./internal/review -run TestDraftAndPost`.
 - `make lint` runs golangci-lint v2 with the strict `.golangci.yaml`, and `make vet` runs `go vet`. Run `golangci-lint fmt -c .golangci.yaml ./...` to fix imports. CI also fails when `go mod tidy -diff` shows a change.
+- `MCP_CONFIG=mcp.yaml go run ./cmd/agent-nexus mcp` connects to each MCP server and lists the tools the agent gets, with their size in tokens.
 - `go run ./cmd/agent-nexus review -forge gitea -repo o/r -pr N -dry-run -transcript` runs one real review without posting it. It needs the LLM and forge env vars listed in README.md. Add `SKILLS_DIR=./skills` to try skill edits without rebuilding.
 - `CONTAINER_TOOL=podman make docker-build`. The local docker has no buildx.
 - `make css` builds the UI stylesheet with the Tailwind standalone CLI (downloaded to `bin/`); the output is gitignored, and `make build`, `make run` and the Dockerfile build it. Tests do not need it.
@@ -42,6 +43,11 @@ The flow is event → job → handler → agent → forge.
 - **`internal/tools`:** read-only tools over git objects: `Commit` at a commit, `Repo` adds a pull request's `get_file_diff`.
 - **`internal/forge`:** Gitea (bot token) and GitHub (App JWT → installation token), as hand-rolled REST clients. `forgetest.Fake` is an in-memory forge for tests.
 - **`internal/remote`:** the agent's internet access. `NewHTTPClient` only dials public addresses; `Client` adds size-capped GETs, anonymous OCI registry reads (`RegistryGet`, `ImageLabels`), GitHub releases and pages as text (`FetchPage`).
+- **`internal/mcp`:** the tools of MCP servers, through the official go-sdk, which speaks both protocol eras: `server/discover` (2026-07-28), and `initialize` for servers with sessions.
+  - `MCP_CONFIG` names a YAML file (`LoadConfig`). Each server has a required tool allowlist, the jobs it serves (`chat` by default), and a `load` mode (`lazy` by default).
+  - `Reviewer.openMCP` (`internal/review/mcp.go`) sets up a job's servers. It opens the eager ones in parallel, and `tools.MCP` offers their tools as `<server>_<tool>`. A server that is down is left out.
+  - Lazy servers are only named in the prompt. `tools.MCPLazy` gives `mcp_tools`, which opens a server on first use (`mcp.Lazy`) and lists its tools as text, and `mcp_call`. Either way the tool list never changes within a conversation, so llama-server keeps its prompt cache.
+  - `mcptest.Fake` is the SDK's own server. The SDK serves 2026-07-28 only when stateless, so `LegacyOnly` (sessions) is how the older era is tested.
 - **`internal/charts`:** reads Helm chart packages from HTTP (`index.yaml`) and OCI repositories through `remote.Client`, caches them on disk and unpacks them in memory.
 - **Remote tools:**
   - `tools.Charts` exposes `chart_files`, `chart_read` and `chart_diff`; the diff uses `gitrepo.DiffBlobs`.
@@ -66,6 +72,10 @@ The flow is event → job → handler → agent → forge.
   - Another repository of the forge must be the reviewed one, or appear in the base commit as `<forge host>/<owner>/<name>` (`openRepo`). It is read with the forge's credentials only: never add credentials for other hosts to agent-nexus. Those belong in a proxy or an MCP server outside it.
   - Every connection goes through `remote.NewHTTPClient`, which refuses non-public addresses at dial time, redirects included.
   - Never send credentials to these hosts, and never give the agent a fetcher without these guards.
+- **MCP servers are chosen by the operator, never by the model.**
+  - Their URLs come from `MCP_CONFIG`, so they may be private, and their client follows no redirect. A lazy server is named by the model only among the job's servers.
+  - Only the allowlisted tools are offered, and only to the jobs a server lists; `Session.Call` refuses any other. Chat is the default because PR text is untrusted.
+  - The one credential agent-nexus holds for a server is the token reaching it. The backend's credentials stay in the server.
 - **The UI has no authentication.** It only reads the store and runs on its own listener, so the deployment puts it behind an authenticating proxy while the API ingress stays reachable with API keys. Keep it read-only, and keep the CSP (`default-src 'self'`, htmx with `allowEval: false`): no inline scripts or styles.
 - **The verdict follows the discussion, but only through the bot's own markers.** A review lists its findings (`findingsMarker`); answers record the ones they settle (`resolvesMarker`, counted only on the bot's notes and only for the latest review of the head). `approveIfSettled` approves once all are settled, in verdict mode, after re-reading the head; the approval carries a `sha=<head>:settled=` marker and becomes the latest review, which keeps it idempotent.
 - **Reviews are `COMMENT` unless the repository resolves to verdict mode.** See `resolveMode` in `internal/review/mode.go`: an exact central rule, then `.agent-nexus.yaml` on the base commit, then central patterns, then comment. `verdictEvent` downgrades a verdict that contradicts the findings, and `postAttempts` falls back to a comment if the forge refuses the verdict.
@@ -76,11 +86,13 @@ The flow is event → job → handler → agent → forge.
   - `forgetest.Fake` for forges;
   - `zuliptest.Fake` for Zulip;
   - `gitrepotest.New` for a repository with a base and a PR head;
-  - `chartstest.NewRepo` for a chart repository.
+  - `chartstest.NewRepo` for a chart repository;
+  - `mcptest.New` for an MCP server.
 - `internal/review` tests build on `newFixture` and `fakeLLM`. `fakeLLM` replays canned assistant messages in order and fails on an extra call. The last message is the final JSON (`fixture.script`).
 - `remote.NewHTTPClient` refuses loopback, so tests pass `srv.Client()` to `remote.New` to reach an `httptest` server.
 
 ## Style
 
 - Stdlib first: slog, env config, `net/http` ServeMux patterns, `flag`, stdlib `testing`. No testify, cobra or viper.
+- Clients are hand-rolled, except MCP, which goes through `github.com/modelcontextprotocol/go-sdk` because the protocol has two eras.
 - Wrap errors as `"<op>: %w"`. Use `errors.New` for constant messages, which perfsprint enforces.

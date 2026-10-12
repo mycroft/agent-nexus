@@ -45,4 +45,11 @@ var (
 		Name: "agent_nexus_forge_errors_total",
 		Help: "Failed forge API requests by forge.",
 	}, []string{"forge"})
+
+	// MCPErrorsTotal counts MCP servers a job could not open: a failed
+	// connection or tool list.
+	MCPErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "agent_nexus_mcp_errors_total",
+		Help: "MCP servers a job could not open, by server.",
+	}, []string{"server"})
 )

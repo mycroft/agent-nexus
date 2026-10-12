@@ -14,9 +14,15 @@ spec:
       {{- include "agent-nexus.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations .Values.mcp.servers }}
       annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.mcp.servers }}
+        # Rolls the pod when the MCP configuration changes.
+        checksum/mcp: {{ include "agent-nexus.mcpConfig" . | sha256sum }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "agent-nexus.selectorLabels" . | nindent 8 }}
@@ -112,6 +118,15 @@ spec:
             {{- include "agent-nexus.secretEnv" (dict "name" "ZULIP_BOT_API_KEY" "secret" .Values.existingSecret "key" "zulip-bot-api-key") | nindent 12 }}
             {{- include "agent-nexus.secretEnv" (dict "name" "ZULIP_WEBHOOK_TOKEN" "secret" .Values.existingSecret "key" "zulip-webhook-token") | nindent 12 }}
             {{- end }}
+            {{- if .Values.mcp.servers }}
+            - name: MCP_CONFIG
+              value: /etc/agent-nexus/mcp/config.yaml
+            {{- range .Values.mcp.servers }}
+            {{- if .tokenKey }}
+            {{- include "agent-nexus.secretEnv" (dict "name" (include "agent-nexus.mcpTokenEnv" .name) "secret" $.Values.existingSecret "key" .tokenKey) | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -143,10 +158,20 @@ spec:
             # git's HOME; the root filesystem is read-only.
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.mcp.servers }}
+            - name: mcp
+              mountPath: /etc/agent-nexus/mcp
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
+        {{- if .Values.mcp.servers }}
+        - name: mcp
+          configMap:
+            name: {{ include "agent-nexus.fullname" . }}-mcp
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

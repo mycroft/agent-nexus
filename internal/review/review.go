@@ -18,6 +18,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/gitrepo"
 	"github.com/mycroft/agent-nexus/internal/jobs"
 	"github.com/mycroft/agent-nexus/internal/llm"
+	"github.com/mycroft/agent-nexus/internal/mcp"
 	"github.com/mycroft/agent-nexus/internal/remote"
 	"github.com/mycroft/agent-nexus/internal/skill"
 )
@@ -124,6 +125,9 @@ type Reviewer struct {
 	// the hosts and images the base branch references, and FetchHosts.
 	Remote     *remote.Client
 	FetchHosts []string
+	// MCP are the configured MCP servers. Each job gets the tools of those
+	// serving it (see openMCP).
+	MCP []*mcp.Client
 	// Enqueue queues a job; discussions use it to start a review asked
 	// for in a comment. Without it, such comments are answered like
 	// questions.
@@ -258,9 +262,11 @@ func (r *Reviewer) Draft(ctx context.Context, req Request, jobID int64, record f
 		Record:        record,
 		Logger:        r.Logger,
 	}
-	system := systemPrompt(r.Skill.Body, repoID, f.Name(), pr, ws.toolsSentence(), ws.guidanceName, ws.guidance)
+	mcpTools, mcpSentence, closeMCP := r.openMCP(ctx, mcp.JobReview)
+	defer closeMCP()
+	system := systemPrompt(r.Skill.Body, repoID, f.Name(), pr, withMCP(ws.toolsSentence(), mcpSentence), ws.guidanceName, ws.guidance)
 	user := userPrompt(repoID, f.Name(), pr, ws.baseSHA, ws.changed(ctx)) + r.earlierDiscussion(ctx, f, repoID, pr.Number)
-	session, err := runner.Run(ctx, system, user, ws.tools())
+	session, err := runner.Run(ctx, system, user, append(ws.tools(), mcpTools...))
 	if err != nil {
 		return nil, "", fmt.Errorf("agent: %w", err)
 	}

@@ -68,3 +68,17 @@ fetch:
   allowedHosts:
     - charts.example.com
     - registry-1.docker.io
+mcp:
+  servers:
+    - name: k8s
+      url: http://kubernetes-mcp-server.mcp.svc:8080/mcp
+      description: the live state of the cluster, read-only
+      tools: [pods_list, pods_get, pods_log, events_list]
+      load: eager
+    - name: grafana
+      url: http://mcp-grafana.mcp.svc:8000/mcp
+      description: Prometheus metrics and Loki logs, through Grafana
+      tools: [query_prometheus, query_loki_logs, "list_*"]
+      jobs: [chat, review]
+      timeout: 2m
+      tokenKey: mcp-grafana-token
