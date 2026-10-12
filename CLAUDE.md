@@ -1,12 +1,12 @@
 # CLAUDE.md
 
-This file guides Claude Code when working in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Commands
 
-- `make test` runs `go test -race ./...`. Tests need `git` on the PATH: the gitrepo and review tests build real repositories with `internal/gitrepo/gitrepotest`.
-- `make lint` runs golangci-lint v2 with the strict `.golangci.yaml`, and `make vet` runs `go vet`. Run `golangci-lint fmt -c .golangci.yaml ./...` to fix imports.
-- `go run ./cmd/agent-nexus review -forge gitea -repo o/r -pr N -dry-run -transcript` runs one real review without posting it. It needs the LLM and forge env vars listed in README.md.
+- `make test` runs `go test -race ./...`. Tests need `git` on the PATH: the gitrepo and review tests build real repositories with `internal/gitrepo/gitrepotest`. Run one test with `go test -race ./internal/review -run TestDraftAndPost`.
+- `make lint` runs golangci-lint v2 with the strict `.golangci.yaml`, and `make vet` runs `go vet`. Run `golangci-lint fmt -c .golangci.yaml ./...` to fix imports. CI also fails when `go mod tidy -diff` shows a change.
+- `go run ./cmd/agent-nexus review -forge gitea -repo o/r -pr N -dry-run -transcript` runs one real review without posting it. It needs the LLM and forge env vars listed in README.md. Add `SKILLS_DIR=./skills` to try skill edits without rebuilding.
 - `CONTAINER_TOOL=podman make docker-build`. The local docker has no buildx.
 - `make css` builds the UI stylesheet with the Tailwind standalone CLI (downloaded to `bin/`); the output is gitignored, and `make build`, `make run` and the Dockerfile build it. Tests do not need it.
 - `make helm-lint` lints `charts/agent-nexus` with each `ci/*-values.yaml`. The chart `fail`s on missing required values, so linting it with the defaults is expected to fail.
@@ -20,9 +20,11 @@ The flow is event → job → handler → agent → forge.
 - **`internal/jobs`:** a SQLite store and worker pool.
   - Each job has a `dedupe_key` (one live job per commit) and a `group_key` (a newer commit supersedes older jobs, and cancels them if they are running).
   - `Checkpoint` stores the drafted review and moves the job to `posting`, so crash recovery re-posts instead of re-running the LLM.
+  - A schema change is a new numbered file in `internal/jobs/migrations/`. Files apply in name order and are recorded in `schema_migrations`.
 - **`internal/review`:** the `pr_review` handler.
   - `Draft` gathers the PR, diff and base-branch `AGENTS.md`, runs the agent, then makes one final schema-constrained call.
   - `Post` is idempotent: it looks for the `<!-- agent-nexus:sha=… -->` marker before posting.
+  - `internal/diff` parses the diff. `Annotated` shows the model new-side line numbers. A finding becomes an inline comment only on a `Commentable` line; otherwise it goes in the review body.
 - **`internal/review` (discussion):** the `pr_discussion` handler (`DiscussionHandler`). `POST /v1/events/pr-comment` queues one with `KeepRunning`, so a newer pass replaces a queued one and a running one finishes. Closed and merged pull requests are discussed too; `prepare` then diffs from `PR.MergeBase`, because the base branch holds the change. Reviews and approvals stay for open pull requests.
   - `pendingAsks` finds human replies in threads the bot took part in, and mentions of `@agent-nexus`, that no reply marker covers.
   - Answers follow `skills/pr-discussion`.
@@ -34,6 +36,8 @@ The flow is event → job → handler → agent → forge.
 - **`internal/zulip`:** a hand-rolled Zulip client (`History`, `Send`, `React`) and the outgoing webhook payload. `zuliptest.Fake` is an in-memory Zulip server for tests.
 - **`internal/agent`:** the tool-calling loop. It records the transcript and elides old tool output as the conversation nears the context window. It also stops investigating when the context's deadline (`JOB_TIMEOUT`) leaves time only for another turn and the final answer, each estimated at the slowest turn so far, so a slow model yields a shorter review, not a timed-out job. `Finish` likewise skips its remaining cache-friendly retries for the schema-constrained fallback (no thinking, always parses) when no time is left for another call. In the last three turns, by the turn limit or the deadline, the loop tells the model how many it has left (`turnsLeftNote`), so it concludes rather than being cut short.
 - **`internal/llm`:** a hand-rolled OpenAI-compatible client, with llama-server extras (`reasoning_content`, `chat_template_kwargs`, `thinking_budget_tokens` from `LLM_THINKING_BUDGET`, `/props`). Only sampling parameters may vary between the calls of a conversation: anything that changes the rendered prompt (tools, template kwargs) costs llama-server its prompt cache.
+- **`internal/httpclient`:** the retrying client of the forge, LLM and Zulip clients. It retries network errors, 429 and 5xx on GET, HEAD and DELETE. Only the LLM client retries POSTs (`WithRetryPOST`).
+- **`internal/config`:** every setting is an env var read by `config.Load`. A new one usually also goes in README's table, the chart's `values.yaml` and `templates/statefulset.yaml`.
 - **`internal/gitrepo`:** a bare-repo cache plus a hardened git CLI wrapper. Nothing is ever checked out.
 - **`internal/tools`:** read-only tools over git objects: `Commit` at a commit, `Repo` adds a pull request's `get_file_diff`.
 - **`internal/forge`:** Gitea (bot token) and GitHub (App JWT → installation token), as hand-rolled REST clients. `forgetest.Fake` is an in-memory forge for tests.
@@ -65,6 +69,16 @@ The flow is event → job → handler → agent → forge.
 - **The UI has no authentication.** It only reads the store and runs on its own listener, so the deployment puts it behind an authenticating proxy while the API ingress stays reachable with API keys. Keep it read-only, and keep the CSP (`default-src 'self'`, htmx with `allowEval: false`): no inline scripts or styles.
 - **The verdict follows the discussion, but only through the bot's own markers.** A review lists its findings (`findingsMarker`); answers record the ones they settle (`resolvesMarker`, counted only on the bot's notes and only for the latest review of the head). `approveIfSettled` approves once all are settled, in verdict mode, after re-reading the head; the approval carries a `sha=<head>:settled=` marker and becomes the latest review, which keeps it idempotent.
 - **Reviews are `COMMENT` unless the repository resolves to verdict mode.** See `resolveMode` in `internal/review/mode.go`: an exact central rule, then `.agent-nexus.yaml` on the base commit, then central patterns, then comment. `verdictEvent` downgrades a verdict that contradicts the findings, and `postAttempts` falls back to a comment if the forge refuses the verdict.
+
+## Testing
+
+- Tests run against fakes, never a live service:
+  - `forgetest.Fake` for forges;
+  - `zuliptest.Fake` for Zulip;
+  - `gitrepotest.New` for a repository with a base and a PR head;
+  - `chartstest.NewRepo` for a chart repository.
+- `internal/review` tests build on `newFixture` and `fakeLLM`. `fakeLLM` replays canned assistant messages in order and fails on an extra call. The last message is the final JSON (`fixture.script`).
+- `remote.NewHTTPClient` refuses loopback, so tests pass `srv.Client()` to `remote.New` to reach an `httptest` server.
 
 ## Style
 
