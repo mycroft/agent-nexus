@@ -42,7 +42,7 @@ func newController(t *testing.T) *controller {
 		t.Fatal(err)
 	}
 	c := &controller{queue: queue, store: store, done: make(chan struct{})}
-	s := &Server{Queue: queue, Tokens: tokens, Timeout: 10 * time.Minute, Version: "1.0.0", Done: c.done, Logger: log, pollWait: 200 * time.Millisecond}
+	s := &Server{Queue: queue, Tokens: tokens, Timeout: 10 * time.Minute, Version: "1.0.0", Done: c.done, Logger: log, pollWait: 200 * time.Millisecond, beatEvery: time.Second}
 	c.srv = httptest.NewServer(s.Handler())
 	t.Cleanup(c.srv.Close)
 	return c
@@ -103,7 +103,7 @@ func TestClaimAndFinish(t *testing.T) {
 
 	j := c.enqueue(t, "pr1", "pr1@a")
 	l := c.claim(t)
-	if l.Job.ID != j.ID || l.Lease == "" || l.TimeoutSeconds != 600 || l.HeartbeatSeconds != 15 ||
+	if l.Job.ID != j.ID || l.Lease == "" || l.TimeoutSeconds != 600 || l.HeartbeatSeconds != 1 ||
 		l.Job.Runner != "homelab/box-1" || l.Job.Model != "gpu" || string(l.Job.Payload) != `{"group":"pr1"}` {
 		t.Fatalf("lease = %+v", l)
 	}

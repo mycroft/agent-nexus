@@ -127,3 +127,33 @@ models:
 		t.Error("reviewModel found a model without one serving reviews")
 	}
 }
+
+func TestRunnerModels(t *testing.T) {
+	ms := parseModels(t, `
+models:
+  - name: gpu
+    baseURL: http://gpu.lan:8080/v1
+    model: big
+    local: false
+  - name: remote
+    jobs: [review]
+  - name: chatty
+    baseURL: http://llm/v1
+    model: small
+    jobs: [chat]
+`)
+	a := &app{cfg: config.Config{Models: ms}, log: slog.New(slog.DiscardHandler), reviewer: &review.Reviewer{}}
+	// A runner serves the models it has an endpoint for, local or not;
+	// without Zulip, chat is not among its kinds.
+	got, err := a.runnerModels(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "gpu" || got[0].Handlers == nil || !slices.Equal(got[0].Kinds, []string{review.Kind, review.DiscussionKind}) {
+		t.Errorf("runner models = %+v", got)
+	}
+	a.cfg.Models = ms[1:2]
+	if _, err := a.runnerModels(nil); err == nil {
+		t.Error("runnerModels accepted a runner without a model to run")
+	}
+}

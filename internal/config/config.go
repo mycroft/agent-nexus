@@ -47,6 +47,12 @@ type Config struct {
 	// RunnerTokens is the raw "name=token,..." list of the runners the
 	// controller hands jobs to. Empty serves no runner API.
 	RunnerTokens string
+	// ControllerURL, RunnerToken and RunnerName configure the runner
+	// command: the controller's API root, the token it knows the runner
+	// by, and the runner's instance name (the host name by default).
+	ControllerURL string
+	RunnerToken   string
+	RunnerName    string
 	// AllowedOwners restricts which repository owners may be reviewed
 	// (case-insensitive). Empty allows none.
 	AllowedOwners []string
@@ -103,6 +109,9 @@ func Load() (Config, error) {
 		MCPConfig:           os.Getenv("MCP_CONFIG"),
 		APIKeys:             os.Getenv("API_KEYS"),
 		RunnerTokens:        os.Getenv("RUNNER_TOKENS"),
+		ControllerURL:       os.Getenv("CONTROLLER_URL"),
+		RunnerToken:         os.Getenv("RUNNER_TOKEN"),
+		RunnerName:          os.Getenv("RUNNER_NAME"),
 		AllowedOwners:       splitList(os.Getenv("ALLOWED_OWNERS")),
 		ReviewModes:         os.Getenv("REVIEW_MODES"),
 		ModelsConfig:        os.Getenv("MODELS_CONFIG"),
@@ -160,13 +169,19 @@ func Load() (Config, error) {
 	if !c.GiteaEnabled() && !c.GitHubEnabled() {
 		return Config{}, errors.New("configure at least one forge (GITEA_* or GITHUB_APP_*)")
 	}
+	// ZULIP_WEBHOOK_TOKEN only authenticates the controller's webhook:
+	// serve requires it.
 	if err := requireAllOrNone("Zulip", map[string]string{
-		"ZULIP_URL":           c.ZulipURL,
-		"ZULIP_BOT_EMAIL":     c.ZulipBotEmail,
-		"ZULIP_BOT_API_KEY":   c.ZulipBotAPIKey,
-		"ZULIP_WEBHOOK_TOKEN": c.ZulipWebhookToken,
+		"ZULIP_URL":         c.ZulipURL,
+		"ZULIP_BOT_EMAIL":   c.ZulipBotEmail,
+		"ZULIP_BOT_API_KEY": c.ZulipBotAPIKey,
 	}); err != nil {
 		return Config{}, err
+	}
+	if c.RunnerName == "" {
+		if c.RunnerName, err = os.Hostname(); err != nil {
+			return Config{}, fmt.Errorf("RUNNER_NAME is unset and the host name unknown: %w", err)
+		}
 	}
 	return c, nil
 }

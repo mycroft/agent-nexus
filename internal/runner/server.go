@@ -42,9 +42,10 @@ type Server struct {
 	Done   <-chan struct{}
 	Logger *slog.Logger
 
-	// pollWait, when set, replaces the default (tests).
-	pollWait time.Duration
-	warned   sync.Map // runners whose version was reported
+	// pollWait and beatEvery, when set, replace the defaults (tests).
+	pollWait  time.Duration
+	beatEvery time.Duration
+	warned    sync.Map // runners whose version was reported
 }
 
 // Handler returns the runner API routes, under /v1/runner/.
@@ -124,9 +125,13 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 // runner went away meanwhile: otherwise it would wait for its lease to
 // expire.
 func (s *Server) hand(w http.ResponseWriter, r *http.Request, log *slog.Logger, job *jobs.Job) {
+	beatEvery := s.beatEvery
+	if beatEvery == 0 {
+		beatEvery = HeartbeatInterval
+	}
 	l := Lease{
 		Job: *job, Checkpoint: job.Checkpoint, Lease: job.Lease,
-		TimeoutSeconds: int(s.Timeout / time.Second), HeartbeatSeconds: int(HeartbeatInterval / time.Second),
+		TimeoutSeconds: int(s.Timeout / time.Second), HeartbeatSeconds: int(beatEvery / time.Second),
 	}
 	body, err := json.Marshal(l)
 	if err == nil && r.Context().Err() == nil {

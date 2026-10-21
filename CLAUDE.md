@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `make test` runs `go test -race ./...`. Tests need `git` on the PATH: the gitrepo and review tests build real repositories with `internal/gitrepo/gitrepotest`. Run one test with `go test -race ./internal/review -run TestDraftAndPost`.
 - `make lint` runs golangci-lint v2 with the strict `.golangci.yaml`, and `make vet` runs `go vet`. Run `golangci-lint fmt -c .golangci.yaml ./...` to fix imports. CI also fails when `go mod tidy -diff` shows a change.
 - `MCP_CONFIG=mcp.yaml go run ./cmd/agent-nexus mcp` connects to each MCP server and lists the tools the agent gets, with their size in tokens.
+- `go run ./cmd/agent-nexus runner` runs jobs leased from the controller at `CONTROLLER_URL`, with `RUNNER_TOKEN` (one of the controller's `RUNNER_TOKENS`).
 - `go run ./cmd/agent-nexus review -forge gitea -repo o/r -pr N -dry-run -transcript` runs one real review without posting it. It needs the LLM and forge env vars listed in README.md. Add `SKILLS_DIR=./skills` to try skill edits without rebuilding.
 - `CONTAINER_TOOL=podman make docker-build`. The local docker has no buildx.
 - `make css` builds the UI stylesheet with the Tailwind standalone CLI (downloaded to `bin/`); the output is gitignored, and `make build`, `make run` and the Dockerfile build it. Tests do not need it.
@@ -42,6 +43,7 @@ The flow is event → job → handler → agent → forge.
 - **`internal/llm`:** a hand-rolled OpenAI-compatible client, with llama-server extras (`reasoning_content`, `chat_template_kwargs`, `thinking_budget_tokens` from `LLM_THINKING_BUDGET`, `/props`). Only sampling parameters may vary between the calls of a conversation: anything that changes the rendered prompt (tools, template kwargs) costs llama-server its prompt cache.
 - **`internal/httpclient`:** the retrying client of the forge, LLM and Zulip clients. It retries network errors, 429 and 5xx on GET, HEAD and DELETE. Only the LLM client retries POSTs (`WithRetryPOST`).
 - **`internal/runner`:** the runner API, on the API listener under `/v1/runner/` when `RUNNER_TOKENS` is set (`Server`). A claim long-polls on `Queue.Changed` for a job of the runner's model (`Queue.ClaimFor`: the controller's concurrency and kinds, never the runner's), and hands it with its checkpoint and lease, or releases it if the runner went away. Heartbeats renew the lease (`Queue.Heartbeat`), and `409` tells the runner to stop.
+  - `agent-nexus runner` (`runJobs`) builds the same handlers as `serve` for each model it has a `baseURL` for (`runnerModels`), with `Reviewer.Enqueue` going to the controller. `Worker` claims with `Client`, runs `jobs.Execute` with the client as the `jobs.Writer`, renews the lease, stops the job on a `409` or after `unreachableAfter` without renewal (before the controller reaps it), and releases its jobs at shutdown.
 - **`internal/models`:** the LLMs jobs run on. `MODELS_CONFIG` names a YAML file (`LoadConfig`, like `internal/mcp`); without it, `LLM_*` configure one model named `default`. `main` builds one handler set per model through `Reviewer.WithModel`. The UI and `agent_nexus_model_jobs`/`_concurrency` show each model's slots in use (`Store.ModelUsage`); job and LLM metrics carry a `model` label (`llm.WithName`).
 - **`internal/config`:** every setting is an env var read by `config.Load`. A new one usually also goes in README's table, the chart's `values.yaml` and `templates/statefulset.yaml`.
 - **`internal/gitrepo`:** a bare-repo cache plus a hardened git CLI wrapper. Nothing is ever checked out.
@@ -64,6 +66,7 @@ The flow is event → job → handler → agent → forge.
 
 ## Invariants
 
+- **The runner API never carries credentials.** A runner reads its own forge, Zulip, MCP and LLM credentials from its environment; the controller only sends jobs, leases and checkpoints.
 - **Model input never becomes a git option.** It goes after `-e`, `--end-of-options` or `--`, or inside a `sha:path` with a path checked by `CleanPath`. Revisions are always SHAs that agent-nexus chose.
 - **Forge POSTs are never retried by the HTTP client.** A failed Gitea review can leave a pending review behind. `Post` deletes it and checks for the marker before trying again.
 - **A worker writes to a job only through its claim's lease.** Never add a store write on a started job that does not check the lease: a worker that lost the job (superseded and released, or reaped) must not touch the new attempt.

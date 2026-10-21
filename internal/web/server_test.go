@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mycroft/agent-nexus/internal/jobs"
 )
@@ -149,7 +150,7 @@ func TestModels(t *testing.T) {
 	}
 	h := ui.Handler()
 	running := enqueue(t, store, "gitea", 1)
-	if got, err := store.Claim(ctx, jobs.ClaimSpec{Model: "big", Limit: 1}); err != nil || got.ID != running {
+	if got, err := store.Claim(ctx, jobs.ClaimSpec{Model: "big", Limit: 1, Runner: "homelab/box-1", LeaseTTL: time.Minute}); err != nil || got.ID != running {
 		t.Fatalf("Claim = %+v, %v", got, err)
 	}
 
@@ -157,12 +158,14 @@ func TestModels(t *testing.T) {
 	// and the model of the running job.
 	_, body := get(t, h, "/fragments/live")
 	assertContains(t, body, `title="1 of 1 slots used"`, `big <span class="tabular-nums text-slate-500 dark:text-slate-400">1/1</span>`,
-		`title="0 of 2 slots used"`, `<dt class="inline">model</dt> <dd class="inline">big</dd>`)
+		`title="0 of 2 slots used"`, `<dt class="inline">model</dt> <dd class="inline">big</dd>`,
+		`<dt class="inline">runner</dt> <dd class="inline font-mono">homelab/box-1</dd>`,
+		fmt.Sprintf(`seen=%d:running@homelab/box-1"`, running))
 	if !strings.Contains(body, `border-amber-200 bg-amber-50/70 dark:border-amber-500/25 dark:bg-amber-500/5" title="1 of 1`) {
 		t.Error("the full model is not highlighted")
 	}
 	_, body = get(t, h, fmt.Sprintf("/jobs/%d", running))
-	assertContains(t, body, `Model</dt><dd>big</dd>`)
+	assertContains(t, body, `Model</dt><dd>big</dd>`, `Runner</dt><dd class="font-mono text-xs leading-5">homelab/box-1</dd>`)
 
 	// Without models, there is no slot line.
 	h, _ = newTestUI(t)

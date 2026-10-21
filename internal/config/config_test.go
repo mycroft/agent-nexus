@@ -67,6 +67,26 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadRunner(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if host, _ := os.Hostname(); err != nil || c.RunnerName != host || c.ControllerURL != "" {
+		t.Errorf("runner: %q, %q, %v; want the host name by default", c.RunnerName, c.ControllerURL, err)
+	}
+	t.Setenv("CONTROLLER_URL", "https://agent-nexus.example.com")
+	t.Setenv("RUNNER_TOKEN", "token")
+	t.Setenv("RUNNER_NAME", "box-1")
+	// A runner needs no webhook token: only the controller receives the
+	// webhook.
+	t.Setenv("ZULIP_URL", "https://zulip.example.com")
+	t.Setenv("ZULIP_BOT_EMAIL", "bot@zulip.example.com")
+	t.Setenv("ZULIP_BOT_API_KEY", "key")
+	c, err = Load()
+	if err != nil || c.ControllerURL != "https://agent-nexus.example.com" || c.RunnerToken != "token" || c.RunnerName != "box-1" || !c.ZulipEnabled() {
+		t.Errorf("runner: %+v, %v", c, err)
+	}
+}
+
 func TestLoadModelsConfig(t *testing.T) {
 	setBase(t)
 	p := filepath.Join(t.TempDir(), "models.yaml")

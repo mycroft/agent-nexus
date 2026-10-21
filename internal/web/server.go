@@ -199,7 +199,12 @@ func (s *Server) live(r *http.Request) (live, error) {
 	}
 	var seen []string
 	for _, j := range append(append([]jobView{}, l.Active...), l.Queued...) {
-		seen = append(seen, fmt.Sprintf("%d:%s", j.ID, j.Status))
+		s := fmt.Sprintf("%d:%s", j.ID, j.Status)
+		if j.Runner != "" {
+			// A job another runner took back changes too.
+			s += "@" + j.Runner
+		}
+		seen = append(seen, s)
 	}
 	l.Seen = strings.Join(seen, ",")
 	return l, nil
@@ -350,9 +355,12 @@ type jobView struct {
 	Forced  bool
 	// Label names what a job without a pull request is about, such as a
 	// chat conversation.
-	Label        string
-	APIKeyName   string
-	Model        string
+	Label      string
+	APIKeyName string
+	Model      string
+	// Runner names the runner holding or having run the job, empty for
+	// the controller itself.
+	Runner       string
 	CreatedAt    time.Time
 	StartedAt    *time.Time
 	FinishedAt   *time.Time
@@ -365,7 +373,7 @@ type jobView struct {
 
 func newJobView(j jobs.JobSummary, forgeURLs map[string]string) jobView {
 	v := jobView{
-		ID: j.ID, Kind: j.Kind, Status: j.Status, APIKeyName: j.APIKeyName, Model: j.Model,
+		ID: j.ID, Kind: j.Kind, Status: j.Status, APIKeyName: j.APIKeyName, Model: j.Model, Runner: j.Runner,
 		CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
 		Attempts: j.Attempts, Error: j.Error, Progress: j.Progress,
 	}

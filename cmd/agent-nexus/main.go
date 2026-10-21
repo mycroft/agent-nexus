@@ -48,6 +48,7 @@ const usage = `usage: agent-nexus <command> [flags]
 
 commands:
   serve     run the HTTP API and the job workers
+  runner    run jobs leased from a controller (CONTROLLER_URL, RUNNER_TOKEN)
   review    review one pull request now (see agent-nexus review -h)
   mcp       list the tools the configured MCP servers give the agent
   version   print the version
@@ -64,6 +65,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = serve()
+	case "runner":
+		err = runJobs()
 	case "review":
 		err = reviewOnce(os.Args[2:])
 	case "mcp":
@@ -211,16 +214,13 @@ var jobKinds = map[string]string{
 // its jobs this deployment handles (chat only with Zulip), and runs them
 // here if it is local and has an endpoint.
 func (a *app) jobModels(zulipClient *zulip.Client, runners bool) ([]jobs.Model, error) {
-	enabled := map[string]bool{review.Kind: true, review.DiscussionKind: true, review.ChatKind: zulipClient != nil}
+	enabled := enabledKinds(zulipClient)
 	served, local := map[string]bool{}, map[string]bool{}
 	var out []jobs.Model
 	for _, m := range a.cfg.Models {
-		jm := jobs.Model{Name: m.Name, Concurrency: m.Concurrency}
-		for _, j := range m.Jobs {
-			if k := jobKinds[j]; enabled[k] {
-				jm.Kinds = append(jm.Kinds, k)
-				served[k] = true
-			}
+		jm := jobs.Model{Name: m.Name, Concurrency: m.Concurrency, Kinds: modelKinds(m, enabled)}
+		for _, k := range jm.Kinds {
+			served[k] = true
 		}
 		if m.Local && m.Runnable() {
 			client, err := newLLM(m)
@@ -246,6 +246,46 @@ func (a *app) jobModels(zulipClient *zulip.Client, runners bool) ([]jobs.Model, 
 		}
 	}
 	return out, nil
+}
+
+// runnerModels returns the models a runner serves: those it has an
+// endpoint for, with the kinds of their jobs it handles. The controller
+// further bounds what they run.
+func (a *app) runnerModels(zulipClient *zulip.Client) ([]jobs.Model, error) {
+	enabled := enabledKinds(zulipClient)
+	var out []jobs.Model
+	for _, m := range a.cfg.Models {
+		kinds := modelKinds(m, enabled)
+		if !m.Runnable() || len(kinds) == 0 {
+			continue
+		}
+		client, err := newLLM(m)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, jobs.Model{Name: m.Name, Concurrency: m.Concurrency, Kinds: kinds, Handlers: a.handlers(m, client, kinds, zulipClient)})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no model has a baseURL serving a job this runner handles")
+	}
+	return out, nil
+}
+
+// enabledKinds returns the job kinds this deployment handles: chat only
+// with Zulip.
+func enabledKinds(zulipClient *zulip.Client) map[string]bool {
+	return map[string]bool{review.Kind: true, review.DiscussionKind: true, review.ChatKind: zulipClient != nil}
+}
+
+// modelKinds returns the kinds of m's jobs among the enabled ones.
+func modelKinds(m models.Model, enabled map[string]bool) []string {
+	var kinds []string
+	for _, j := range m.Jobs {
+		if k := jobKinds[j]; enabled[k] {
+			kinds = append(kinds, k)
+		}
+	}
+	return kinds
 }
 
 // handlers returns the setup of model m's handlers: once its context size
@@ -297,6 +337,9 @@ func serve() error {
 	}
 	if len(cfg.AllowedOwners) == 0 {
 		return errors.New("ALLOWED_OWNERS is required")
+	}
+	if cfg.ZulipEnabled() && cfg.ZulipWebhookToken == "" {
+		return errors.New("ZULIP_WEBHOOK_TOKEN is required when Zulip is configured")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -418,6 +461,75 @@ func serve() error {
 	}
 	wg.Wait()
 	return runErr
+}
+
+// runJobs runs the runner command: it serves the models it has endpoints
+// for, with jobs leased from the controller, and exposes its own metrics.
+func runJobs() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	log, err := newLogger(cfg.LogLevel, true)
+	if err != nil {
+		return err
+	}
+	slog.SetDefault(log)
+	if cfg.ControllerURL == "" || cfg.RunnerToken == "" {
+		return errors.New("CONTROLLER_URL and RUNNER_TOKEN are required")
+	}
+	// Chat answers name only repositories of these owners.
+	if len(cfg.AllowedOwners) == 0 {
+		return errors.New("ALLOWED_OWNERS is required")
+	}
+	client, err := runner.NewClient(cfg.ControllerURL, cfg.RunnerToken, cfg.RunnerName, version)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	a, err := newApp(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	// A discussion asking for a review queues it at the controller.
+	a.reviewer.Enqueue = client.Enqueue
+	var zulipClient *zulip.Client
+	if cfg.ZulipEnabled() {
+		zulipClient = zulip.New(cfg.ZulipURL, cfg.ZulipBotEmail, cfg.ZulipBotAPIKey)
+	}
+	runnerModels, err := a.runnerModels(zulipClient)
+	if err != nil {
+		return err
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	metricsServer := &http.Server{Addr: cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	errs := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			errs <- fmt.Errorf("listen on %s: %w", metricsServer.Addr, err)
+			stop()
+		}
+	}()
+	log.Info("runner started", "controller", cfg.ControllerURL, "runner", cfg.RunnerName)
+	(&runner.Worker{Client: client, Models: runnerModels, Logger: log}).Run(ctx)
+	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Warn("http shutdown", "addr", metricsServer.Addr, "error", err)
+	}
+	select {
+	case err := <-errs:
+		return err
+	default:
+		return nil
+	}
 }
 
 func reviewOnce(args []string) error {

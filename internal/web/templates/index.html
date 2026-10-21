@@ -29,6 +29,9 @@
       {{- with .Model}}
       <div><dt class="inline">model</dt> <dd class="inline">{{.}}</dd></div>
       {{- end}}
+      {{- with .Runner}}
+      <div><dt class="inline">runner</dt> <dd class="inline font-mono">{{.}}</dd></div>
+      {{- end}}
       {{- with .Progress.LastActivity}}
       <div><dt class="inline">last activity</dt> <dd class="inline">{{ago .}} ago</dd></div>
       {{- end}}
@@ -126,7 +129,7 @@
   </td>
   <td class="hidden whitespace-nowrap px-4 py-2 sm:table-cell">{{if .Repo}}{{.Repo}}<span class="text-slate-400">#{{.PR}}</span>{{else}}{{.Label}}{{end}}</td>
   <td class="whitespace-nowrap px-4 py-2">{{template "status-pill" .Status}}</td>
-  <td class="hidden whitespace-nowrap px-4 py-2 text-slate-600 xl:table-cell dark:text-slate-400">{{.Model}}</td>
+  <td class="hidden whitespace-nowrap px-4 py-2 text-slate-600 xl:table-cell dark:text-slate-400">{{.Model}}{{with .Runner}} <span class="text-xs text-slate-400">on {{.}}</span>{{end}}</td>
   <td class="hidden max-w-56 truncate px-4 py-2 text-slate-600 lg:table-cell dark:text-slate-400" title="{{.Error}}">{{.Outcome}}</td>
   <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums xl:table-cell">{{with .Progress.Turns}}{{.}}{{end}}</td>
   <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums xl:table-cell">{{with .Progress.PeakPromptTokens}}{{tokens .}}{{end}}</td>

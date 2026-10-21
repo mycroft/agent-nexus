@@ -53,6 +53,7 @@ which uses the Agent Skills format and is embedded in the binary.
 
 ```sh
 agent-nexus serve      # HTTP API + workers
+agent-nexus runner     # run jobs leased from a controller (see Runners)
 agent-nexus review -forge gitea -repo mycroft/k8s-home -pr 42 -dry-run -transcript
 agent-nexus mcp        # the tools each MCP server gives the agent
 agent-nexus version
@@ -79,14 +80,16 @@ Everything is configured through environment variables.
 | `AGENT_MAX_TURNS` | `30` | Tool-loop turns per review |
 | `JOB_TIMEOUT` | `30m` | One job end to end; the investigation stops early enough to write the review before it |
 | `API_KEYS` | required for `serve` | `name=key,name=key`, each key ≥ 32 characters |
-| `RUNNER_TOKENS` | | `name=token,…`, each token ≥ 32 characters: the runners `serve` hands jobs to (see [API](#api)) |
+| `RUNNER_TOKENS` | | `name=token,…`, each token ≥ 32 characters: the runners `serve` hands jobs to (see [Runners](#runners)) |
+| `CONTROLLER_URL`, `RUNNER_TOKEN` | required for `runner` | The controller's API root, and this runner's token |
+| `RUNNER_NAME` | host name | This runner instance, as jobs and the UI name it: `<token name>/<RUNNER_NAME>` |
 | `ALLOWED_OWNERS` | required for `serve` | Comma-separated repository owners |
 | `EVENTS_PER_MINUTE` | `30` | Rate limit per API key |
 | `REVIEW_MODES` | | Central review mode rules, `pattern=mode,…` (see below) |
 | `GITEA_URL`, `GITEA_USER`, `GITEA_TOKEN` | | Gitea forge (bot account) |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | | GitHub forge (App, PEM key) |
 | `GITHUB_API_URL`, `GITHUB_SERVER_URL` | github.com | For GitHub Enterprise |
-| `ZULIP_URL`, `ZULIP_BOT_EMAIL`, `ZULIP_BOT_API_KEY`, `ZULIP_WEBHOOK_TOKEN` | | Zulip outgoing webhook bot: server root, then the `email`, `key` and `token` of its zuliprc |
+| `ZULIP_URL`, `ZULIP_BOT_EMAIL`, `ZULIP_BOT_API_KEY`, `ZULIP_WEBHOOK_TOKEN` | | Zulip outgoing webhook bot: server root, then the `email`, `key` and `token` of its zuliprc. Only `serve` needs the token |
 | `LISTEN_ADDR` | `:8080` | API |
 | `METRICS_ADDR` | `:9090` | `/metrics`; keep it out of the Ingress |
 | `UI_ADDR` | `:8081` | Jobs UI, unauthenticated: expose it only behind an authenticating proxy |
@@ -138,6 +141,44 @@ job. A model whose server does not answer takes no job and is asked
 again, backing off up to five minutes; its jobs go to the other models
 serving them, or wait. `agent-nexus review -model <name>` reviews with a
 given model; by default, with the first one serving reviews.
+
+## Runners
+
+By default, `serve` runs every job itself. With `RUNNER_TOKENS`, other
+processes can run jobs too: `agent-nexus runner`, on another machine next
+to its LLM, or in more pods. A runner only dials the controller, over the
+same API listener (see [API](#api)); the controller never dials it.
+
+```sh
+CONTROLLER_URL=https://agent-nexus.example.com RUNNER_TOKEN=… \
+MODELS_CONFIG=models.yaml GITEA_URL=… GITEA_USER=… GITEA_TOKEN=… \
+ALLOWED_OWNERS=mycroft agent-nexus runner
+```
+
+- **What runs where.** The controller keeps the job store, the events,
+  the UI and the models' limits: a model's `concurrency` in its own
+  `MODELS_CONFIG` counts the jobs of every runner and its own. A runner
+  serves each model of its `MODELS_CONFIG` that has a `baseURL`, with up
+  to that model's `concurrency` jobs of its own, of the jobs the
+  controller's configuration gives the model. To leave a model to the
+  runners, give it `local: false`, or no `baseURL`, on the controller.
+- **A runner runs the whole job,** with its own configuration: the
+  forges, Zulip (without `ZULIP_WEBHOOK_TOKEN`), MCP servers, caches,
+  `ALLOWED_OWNERS`, `REVIEW_MODES` and `FETCH_ALLOWED_HOSTS`. Keep these
+  in line with the controller's, or the answer depends on who ran the job.
+  The runner API never carries credentials: each runner has its own.
+- **MCP servers** must be reachable from the runner: an in-cluster URL is
+  not, from another machine. A job leaves out a server it cannot reach.
+- **Caches.** Each runner keeps its own `REPO_CACHE_DIR` and
+  `CHART_CACHE_DIR`; never share one between processes.
+- **Leases.** A runner renews its job's lease every 15 seconds. When the
+  controller supersedes the job, the next renewal stops it. A runner that
+  cannot reach the controller for 90 seconds stops the job and gives it
+  back; one that disappears loses it after 2 minutes, and the job is
+  queued again, for at most 3 attempts. At shutdown, a runner gives its
+  jobs back at once.
+- **Metrics.** A runner serves its own LLM, tool and MCP metrics, and
+  `/healthz`, on `METRICS_ADDR`. Job metrics stay on the controller.
 
 ## Review modes
 

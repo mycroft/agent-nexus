@@ -341,7 +341,7 @@ func (q *Queue) reap(ctx context.Context) {
 
 // serve runs the model's workers once its handlers are ready.
 func (q *Queue) serve(ctx context.Context, m Model) {
-	handlers := q.ready(ctx, m)
+	handlers := WaitReady(ctx, m, q.readyBackoff, q.log)
 	if handlers == nil {
 		return
 	}
@@ -362,10 +362,9 @@ func (q *Queue) serve(ctx context.Context, m Model) {
 	wg.Wait()
 }
 
-// ready calls m.Handlers until it succeeds, backing off between attempts.
-// It returns nil once ctx is done.
-func (q *Queue) ready(ctx context.Context, m Model) map[string]Handler {
-	wait := q.readyBackoff
+// WaitReady calls m.Handlers until it succeeds, backing off from wait
+// between attempts. It returns nil once ctx is done.
+func WaitReady(ctx context.Context, m Model, wait time.Duration, log *slog.Logger) map[string]Handler {
 	for {
 		handlers, err := m.Handlers(ctx)
 		if err == nil {
@@ -374,7 +373,7 @@ func (q *Queue) ready(ctx context.Context, m Model) map[string]Handler {
 		if ctx.Err() != nil {
 			return nil
 		}
-		q.log.WarnContext(ctx, "model not ready; its jobs wait", "model", m.Name, "retry_in", wait, "error", err)
+		log.WarnContext(ctx, "model not ready; its jobs wait", "model", m.Name, "retry_in", wait, "error", err)
 		select {
 		case <-ctx.Done():
 			return nil
