@@ -1,0 +1,18 @@
+{{- if and .Values.runners.enabled .Values.runners.replicas }}
+# The runners' metrics, for the ServiceMonitor: runners serve nothing else.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-nexus.runnerName" . }}
+  labels:
+    {{- include "agent-nexus.runnerLabels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "agent-nexus.runnerSelectorLabels" . | nindent 4 }}
+{{- end }}

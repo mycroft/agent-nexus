@@ -180,6 +180,27 @@ ALLOWED_OWNERS=mycroft agent-nexus runner
 - **Metrics.** A runner serves its own LLM, tool and MCP metrics, and
   `/healthz`, on `METRICS_ADDR`. Job metrics stay on the controller.
 
+The Helm chart runs runner pods next to the controller with
+`runners.enabled` and `runners.replicas`. They share the controller's
+configuration (models, forges, Zulip, MCP servers), dial it through its
+Service, and keep their caches in an emptyDir. Their
+`app.kubernetes.io/name` is `<name>-runner`, so they never join the
+controller's Services; a NetworkPolicy must let them reach its `http`
+port. With `runners.enabled` and no replicas, the controller only takes
+runners from elsewhere: give each its own token in `runner-tokens`.
+
+```yaml
+models:
+  - name: big
+    baseURL: http://llm.llm.svc:8080/v1
+    model: Qwen3-32B
+    concurrency: 2     # across the controller and both runners
+    local: false       # only the runners run it
+runners:
+  enabled: true
+  replicas: 2
+```
+
 ## Review modes
 
 Each repository is reviewed in one of two modes:
@@ -622,8 +643,9 @@ more slots, or another model.
 ## Deployment
 
 The Helm chart in [`charts/agent-nexus`](charts/agent-nexus) runs a
-single-replica StatefulSet. Its volume holds the SQLite job store and the
-repository cache. The pod runs as uid 65532 with a read-only root
+single-replica StatefulSet, the controller, and optionally a Deployment of
+runners (see [Runners](#runners)). The controller's volume holds the
+SQLite job store and the repository cache. The pod runs as uid 65532 with a read-only root
 filesystem.
 
 ```sh
@@ -641,6 +663,9 @@ keys:
 - `github-app-private-key` (when GitHub is enabled)
 - `zulip-bot-api-key` and `zulip-webhook-token` (when Zulip is enabled)
 - the `tokenKey` of each MCP server that has one
+- `runner-tokens`, `name=token,…` (when `runners.enabled`), and the
+  `runners.tokenKey` of the runner pods, one of those tokens (when
+  `runners.replicas`)
 
 Everything else lives in [`values.yaml`](charts/agent-nexus/values.yaml).
 The chart fails to render when a required setting is missing.

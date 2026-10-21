@@ -1,0 +1,39 @@
+# Runner pods next to the controller, for CI (helm lint, kubeconform).
+existingSecret: agent-nexus
+models:
+  - name: big
+    baseURL: https://llm.example.com/v1
+    model: big-model
+    apiKeyKey: llm-api-key
+    # Only the runner pods run it.
+    local: false
+  - name: small
+    baseURL: http://llm-small.example.com:8080/v1
+    model: small-model
+    jobs: [chat]
+gitea:
+  enabled: true
+  url: https://gitea.example.com
+zulip:
+  enabled: true
+  url: https://zulip.example.com
+  botEmail: agent-nexus-bot@zulip.example.com
+allowedOwners:
+  - mycroft
+mcp:
+  servers:
+    - name: k8s
+      url: http://kubernetes-mcp-server.mcp.svc:8080/mcp
+      tools: [pods_list]
+runners:
+  enabled: true
+  replicas: 2
+  cacheSizeLimit: 2Gi
+  resources:
+    limits:
+      memory: 512Mi
+  extraEnv:
+    - name: GOMEMLIMIT
+      value: 450MiB
+serviceMonitor:
+  enabled: true

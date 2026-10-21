@@ -50,100 +50,24 @@ spec:
           env:
             - name: LISTEN_ADDR
               value: ":8080"
-            - name: METRICS_ADDR
-              value: ":9090"
             - name: UI_ADDR
               value: ":8081"
-            - name: LOG_LEVEL
-              value: {{ .Values.logLevel | quote }}
             - name: DB_PATH
               value: /data/agent-nexus.db
-            - name: REPO_CACHE_DIR
-              value: /data/repos
-            - name: CHART_CACHE_DIR
-              value: /data/charts
-            - name: ALLOWED_OWNERS
-              value: {{ join "," .Values.allowedOwners | quote }}
-            {{- with .Values.review.modes }}
-            - name: REVIEW_MODES
-              value: {{ include "agent-nexus.reviewModes" $ | quote }}
-            {{- end }}
             - name: EVENTS_PER_MINUTE
               value: {{ .Values.eventsPerMinute | quote }}
-            - name: AGENT_MAX_TURNS
-              value: {{ .Values.agentMaxTurns | quote }}
             - name: JOB_TIMEOUT
               value: {{ .Values.jobTimeout | quote }}
             - name: TRANSCRIPT_RETENTION
               value: {{ .Values.transcriptRetention | quote }}
-            {{- with .Values.fetch.allowedHosts }}
-            - name: FETCH_ALLOWED_HOSTS
-              value: {{ join "," . | quote }}
-            {{- end }}
             {{- include "agent-nexus.secretEnv" (dict "name" "API_KEYS" "secret" .Values.existingSecret "key" "api-keys") | nindent 12 }}
-            {{- if .Values.models }}
-            - name: MODELS_CONFIG
-              value: /etc/agent-nexus/models/config.yaml
-            {{- range .Values.models }}
-            {{- if .apiKeyKey }}
-            {{- include "agent-nexus.secretEnv" (dict "name" (include "agent-nexus.modelKeyEnv" .name) "secret" $.Values.existingSecret "key" .apiKeyKey) | nindent 12 }}
-            {{- end }}
-            {{- end }}
-            {{- else }}
-            - name: LLM_BASE_URL
-              value: {{ .Values.llm.baseURL | quote }}
-            - name: LLM_MODEL
-              value: {{ .Values.llm.model | quote }}
-            {{- if .Values.llm.contextTokens }}
-            - name: LLM_CONTEXT_TOKENS
-              value: {{ .Values.llm.contextTokens | quote }}
-            {{- end }}
-            {{- if .Values.llm.thinkingBudget }}
-            - name: LLM_THINKING_BUDGET
-              value: {{ .Values.llm.thinkingBudget | quote }}
-            {{- end }}
-            - name: LLM_CONCURRENCY
-              value: {{ .Values.llm.concurrency | quote }}
-            - name: LLM_REQUEST_TIMEOUT
-              value: {{ .Values.llm.requestTimeout | quote }}
-            {{- include "agent-nexus.secretEnv" (dict "name" "LLM_API_KEY" "secret" .Values.existingSecret "key" "llm-api-key" "optional" true) | nindent 12 }}
-            {{- end }}
-            {{- if .Values.gitea.enabled }}
-            - name: GITEA_URL
-              value: {{ .Values.gitea.url | quote }}
-            - name: GITEA_USER
-              value: {{ .Values.gitea.user | quote }}
-            {{- include "agent-nexus.secretEnv" (dict "name" "GITEA_TOKEN" "secret" .Values.existingSecret "key" "gitea-token") | nindent 12 }}
-            {{- end }}
-            {{- if .Values.github.enabled }}
-            - name: GITHUB_APP_ID
-              value: {{ .Values.github.appID | quote }}
-            - name: GITHUB_API_URL
-              value: {{ .Values.github.apiURL | quote }}
-            - name: GITHUB_SERVER_URL
-              value: {{ .Values.github.serverURL | quote }}
-            {{- include "agent-nexus.secretEnv" (dict "name" "GITHUB_APP_PRIVATE_KEY" "secret" .Values.existingSecret "key" "github-app-private-key") | nindent 12 }}
-            {{- end }}
             {{- if .Values.zulip.enabled }}
-            - name: ZULIP_URL
-              value: {{ .Values.zulip.url | quote }}
-            - name: ZULIP_BOT_EMAIL
-              value: {{ .Values.zulip.botEmail | quote }}
-            {{- include "agent-nexus.secretEnv" (dict "name" "ZULIP_BOT_API_KEY" "secret" .Values.existingSecret "key" "zulip-bot-api-key") | nindent 12 }}
             {{- include "agent-nexus.secretEnv" (dict "name" "ZULIP_WEBHOOK_TOKEN" "secret" .Values.existingSecret "key" "zulip-webhook-token") | nindent 12 }}
             {{- end }}
-            {{- if .Values.mcp.servers }}
-            - name: MCP_CONFIG
-              value: /etc/agent-nexus/mcp/config.yaml
-            {{- range .Values.mcp.servers }}
-            {{- if .tokenKey }}
-            {{- include "agent-nexus.secretEnv" (dict "name" (include "agent-nexus.mcpTokenEnv" .name) "secret" $.Values.existingSecret "key" .tokenKey) | nindent 12 }}
+            {{- if .Values.runners.enabled }}
+            {{- include "agent-nexus.secretEnv" (dict "name" "RUNNER_TOKENS" "secret" .Values.existingSecret "key" "runner-tokens") | nindent 12 }}
             {{- end }}
-            {{- end }}
-            {{- end }}
-            {{- with .Values.extraEnv }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
+            {{- include "agent-nexus.agentEnv" . | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080

@@ -1,0 +1,122 @@
+{{- if and .Values.runners.enabled .Values.runners.replicas }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-nexus.runnerName" . }}
+  labels:
+    {{- include "agent-nexus.runnerLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.runners.replicas }}
+  selector:
+    matchLabels:
+      {{- include "agent-nexus.runnerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- if or .Values.podAnnotations .Values.mcp.servers .Values.models }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.models }}
+        checksum/models: {{ include "agent-nexus.modelsConfig" . | sha256sum }}
+        {{- end }}
+        {{- if .Values.mcp.servers }}
+        checksum/mcp: {{ include "agent-nexus.mcpConfig" . | sha256sum }}
+        {{- end }}
+      {{- end }}
+      labels:
+        {{- include "agent-nexus.runnerSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # A runner gives its jobs back to the controller as it stops.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: runner
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - runner
+          env:
+            - name: CONTROLLER_URL
+              value: "http://{{ include "agent-nexus.fullname" . }}:{{ .Values.service.port }}"
+            - name: RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- include "agent-nexus.secretEnv" (dict "name" "RUNNER_TOKEN" "secret" .Values.existingSecret "key" .Values.runners.tokenKey) | nindent 12 }}
+            {{- include "agent-nexus.agentEnv" . | nindent 12 }}
+            {{- with .Values.runners.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.runners.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # git's HOME; the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.mcp.servers }}
+            - name: mcp
+              mountPath: /etc/agent-nexus/mcp
+              readOnly: true
+            {{- end }}
+            {{- if .Values.models }}
+            - name: models
+              mountPath: /etc/agent-nexus/models
+              readOnly: true
+            {{- end }}
+      volumes:
+        # Each runner keeps its own caches: they are never shared.
+        - name: data
+          emptyDir:
+            sizeLimit: {{ .Values.runners.cacheSizeLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        {{- if .Values.mcp.servers }}
+        - name: mcp
+          configMap:
+            name: {{ include "agent-nexus.fullname" . }}-mcp
+        {{- end }}
+        {{- if .Values.models }}
+        - name: models
+          configMap:
+            name: {{ include "agent-nexus.fullname" . }}-models
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

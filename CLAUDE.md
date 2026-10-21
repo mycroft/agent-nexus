@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `go run ./cmd/agent-nexus review -forge gitea -repo o/r -pr N -dry-run -transcript` runs one real review without posting it. It needs the LLM and forge env vars listed in README.md. Add `SKILLS_DIR=./skills` to try skill edits without rebuilding.
 - `CONTAINER_TOOL=podman make docker-build`. The local docker has no buildx.
 - `make css` builds the UI stylesheet with the Tailwind standalone CLI (downloaded to `bin/`); the output is gitignored, and `make build`, `make run` and the Dockerfile build it. Tests do not need it.
-- `make helm-lint` lints `charts/agent-nexus` with each `ci/*-values.yaml`. The chart `fail`s on missing required values, so linting it with the defaults is expected to fail.
+- `make helm-lint` lints `charts/agent-nexus` with each `ci/*-values.yaml`. The controller (StatefulSet) and the runner Deployment share their job environment through `agent-nexus.agentEnv` in `_helpers.tpl`: a setting jobs need goes there, a controller-only one (listeners, store, API keys, webhook token) in `statefulset.yaml`. The chart `fail`s on missing required values, so linting it with the defaults is expected to fail.
 - A `vX.Y.Z` tag releases the image (`build-image.yaml`) and the OCI chart (`release-chart.yaml`), both at version `X.Y.Z`.
 
 ## Architecture

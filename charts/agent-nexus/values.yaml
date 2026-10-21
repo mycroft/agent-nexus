@@ -13,6 +13,8 @@ fullnameOverride: ""
 #   api-keys                "name=key,name=key", keys of 32+ characters (required)
 #   llm-api-key             bearer token for the LLM server (optional)
 #   <models[].apiKeyKey>    API key of that model (optional)
+#   runner-tokens           "name=token,..." of the runners (when runners.enabled)
+#   <runners.tokenKey>      token of the runner pods (when runners.replicas)
 #   gitea-token             token of the Gitea bot (when gitea.enabled)
 #   github-app-private-key  PEM private key of the GitHub App (when github.enabled)
 #   zulip-bot-api-key       API key of the Zulip bot (when zulip.enabled)
@@ -142,6 +144,25 @@ mcp:
   #    timeout: 1m
   #    # A key of existingSecret holding a bearer token for the server.
   #    tokenKey: ""
+# Runners: more processes running jobs (see README.md, "Runners"). Each
+# model's concurrency then counts the jobs of every runner and the
+# controller's; a model with local: false runs on runners only.
+runners:
+  # Hand jobs to runners: the controller reads RUNNER_TOKENS from the
+  # existingSecret key runner-tokens ("name=token,...", each token at
+  # least 32 characters), for these pods and runners elsewhere.
+  enabled: false
+  # Runner pods of this release, configured like the controller (models,
+  # forges, Zulip, MCP servers). 0 leaves the jobs to runners elsewhere.
+  replicas: 0
+  # Key of existingSecret holding these pods' token, one of runner-tokens.
+  tokenKey: runner-token
+  # Their repository and chart caches, in an emptyDir.
+  cacheSizeLimit: 5Gi
+  resources: {}
+  # Extra environment variables for the runner pods only.
+  extraEnv: []
+
 # debug, info, warn or error
 logLevel: info
 
