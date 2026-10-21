@@ -44,6 +44,9 @@ type Config struct {
 
 	// APIKeys is the raw "name=key,name=key" list accepted by the event API.
 	APIKeys string
+	// RunnerTokens is the raw "name=token,..." list of the runners the
+	// controller hands jobs to. Empty serves no runner API.
+	RunnerTokens string
 	// AllowedOwners restricts which repository owners may be reviewed
 	// (case-insensitive). Empty allows none.
 	AllowedOwners []string
@@ -99,6 +102,7 @@ func Load() (Config, error) {
 		SkillsDir:           os.Getenv("SKILLS_DIR"),
 		MCPConfig:           os.Getenv("MCP_CONFIG"),
 		APIKeys:             os.Getenv("API_KEYS"),
+		RunnerTokens:        os.Getenv("RUNNER_TOKENS"),
 		AllowedOwners:       splitList(os.Getenv("ALLOWED_OWNERS")),
 		ReviewModes:         os.Getenv("REVIEW_MODES"),
 		ModelsConfig:        os.Getenv("MODELS_CONFIG"),

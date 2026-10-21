@@ -79,6 +79,7 @@ Everything is configured through environment variables.
 | `AGENT_MAX_TURNS` | `30` | Tool-loop turns per review |
 | `JOB_TIMEOUT` | `30m` | One job end to end; the investigation stops early enough to write the review before it |
 | `API_KEYS` | required for `serve` | `name=key,name=key`, each key ≥ 32 characters |
+| `RUNNER_TOKENS` | | `name=token,…`, each token ≥ 32 characters: the runners `serve` hands jobs to (see [API](#api)) |
 | `ALLOWED_OWNERS` | required for `serve` | Comma-separated repository owners |
 | `EVENTS_PER_MINUTE` | `30` | Rate limit per API key |
 | `REVIEW_MODES` | | Central review mode rules, `pattern=mode,…` (see below) |
@@ -481,7 +482,8 @@ list leaves out, and the patterns that match no tool.
 
 ## API
 
-All `/v1` routes but the Zulip webhook require `Authorization: Bearer <api key>`.
+All `/v1` routes but the Zulip webhook and the runner API require
+`Authorization: Bearer <api key>`.
 
 - `POST /v1/events/pr-review` takes `{"server_url", "repo", "pr", "head_sha"}`,
   and optionally `"force": true` to review a commit that was already
@@ -510,6 +512,22 @@ All `/v1` routes but the Zulip webhook require `Authorization: Bearer <api key>`
 - `GET /v1/jobs/{id}/steps` returns the agent transcript: prompts, tool
   calls and answers.
 - `GET /healthz` needs no key.
+
+With `RUNNER_TOKENS`, `/v1/runner/` serves the runners instead, which
+authenticate with a runner token, never an API key:
+
+- `POST /v1/runner/claim` takes `{"protocol", "version", "runner", "model",
+  "kinds"}` and waits up to 25 seconds for a job of that model: `200`
+  with the job, its checkpoint, a lease and the job timeout, or `204`.
+  The controller's own configuration decides what the model may run: its
+  `concurrency` across all runners, and its `jobs`.
+- `POST /v1/runner/jobs/{id}/heartbeat`, `/steps`, `/checkpoint`,
+  `/finish` and `/release` take the lease. A lease is renewed by a
+  heartbeat at least every 2 minutes, or the job is taken back. `409`
+  tells the runner to stop: the job was superseded, timed out, or is no
+  longer its own.
+- `POST /v1/runner/enqueue` queues a job a handler starts, such as the
+  review an `@agent-nexus review` comment asks for.
 
 ## Jobs UI
 

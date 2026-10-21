@@ -34,6 +34,7 @@ import (
 	"github.com/mycroft/agent-nexus/internal/models"
 	"github.com/mycroft/agent-nexus/internal/remote"
 	"github.com/mycroft/agent-nexus/internal/review"
+	"github.com/mycroft/agent-nexus/internal/runner"
 	"github.com/mycroft/agent-nexus/internal/server"
 	"github.com/mycroft/agent-nexus/internal/skill"
 	"github.com/mycroft/agent-nexus/internal/web"
@@ -209,7 +210,7 @@ var jobKinds = map[string]string{
 // jobModels returns the models of the job queue. Each serves the kinds of
 // its jobs this deployment handles (chat only with Zulip), and runs them
 // here if it is local and has an endpoint.
-func (a *app) jobModels(zulipClient *zulip.Client) ([]jobs.Model, error) {
+func (a *app) jobModels(zulipClient *zulip.Client, runners bool) ([]jobs.Model, error) {
 	enabled := map[string]bool{review.Kind: true, review.DiscussionKind: true, review.ChatKind: zulipClient != nil}
 	served, local := map[string]bool{}, map[string]bool{}
 	var out []jobs.Model
@@ -238,8 +239,10 @@ func (a *app) jobModels(zulipClient *zulip.Client) ([]jobs.Model, error) {
 		case !enabled[k]:
 		case !served[k]:
 			return nil, fmt.Errorf("no model serves %s jobs: add it to a model's jobs", k)
+		case !local[k] && !runners:
+			return nil, fmt.Errorf("no model runs %s jobs here, and RUNNER_TOKENS serves no runner: give a model serving them a baseURL", k)
 		case !local[k]:
-			a.log.Warn("no local model serves this kind: its jobs wait for runners", "kind", k)
+			a.log.Info("no local model serves this kind: runners run its jobs", "kind", k)
 		}
 	}
 	return out, nil
@@ -321,7 +324,7 @@ func serve() error {
 		zulipClient = zulip.New(cfg.ZulipURL, cfg.ZulipBotEmail, cfg.ZulipBotAPIKey)
 		log.Info("zulip configured", "url", cfg.ZulipURL, "bot", cfg.ZulipBotEmail)
 	}
-	jobModels, err := a.jobModels(zulipClient)
+	jobModels, err := a.jobModels(zulipClient, cfg.RunnerTokens != "")
 	if err != nil {
 		return err
 	}
@@ -344,9 +347,22 @@ func serve() error {
 		Queue: queue, Forges: a.forges, AllowedOwners: cfg.AllowedOwners, Keys: keys,
 		Zulip: zulipClient, ZulipToken: cfg.ZulipWebhookToken, Logger: log,
 	}
+	apiHandler := api.Handler()
+	if cfg.RunnerTokens != "" {
+		tokens, err := auth.ParseKeys(cfg.RunnerTokens, 0)
+		if err != nil {
+			return fmt.Errorf("RUNNER_TOKENS: %w", err)
+		}
+		runners := &runner.Server{Queue: queue, Tokens: tokens, Timeout: cfg.JobTimeout, Version: version, Done: ctx.Done(), Logger: log}
+		mux := http.NewServeMux()
+		mux.Handle("/", apiHandler)
+		mux.Handle("/v1/runner/", runners.Handler())
+		apiHandler = mux
+		log.Info("runner API enabled")
+	}
 	apiServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.Handler(),
+		Handler:           apiHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

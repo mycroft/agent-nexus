@@ -361,6 +361,108 @@ func TestRecoverKeepsRunnerLeases(t *testing.T) {
 	}
 }
 
+func TestRunnerClaims(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	gpu := Model{Name: "gpu", Concurrency: 1, Kinds: []string{"review", "chat"}}
+	q := NewQueue(s, []Model{gpu}, 10*time.Minute, time.Hour, slog.New(slog.DiscardHandler))
+	enqueue := func(kind, group string) Job {
+		t.Helper()
+		j, _, err := q.Enqueue(ctx, NewJob{Kind: kind, GroupKey: group, DedupeKey: group, Payload: group})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	review := enqueue("review", "a")
+	chat := enqueue("chat", "b")
+
+	if _, err := q.ClaimFor(ctx, "r/1", "cpu", []string{"review"}); !errors.Is(err, ErrUnknownModel) {
+		t.Errorf("ClaimFor(cpu) = %v, want ErrUnknownModel", err)
+	}
+	// A runner only gets the kinds it can run, and the model's limit holds.
+	if got, err := q.ClaimFor(ctx, "r/1", "gpu", []string{"triage"}); err != nil || got != nil {
+		t.Errorf("ClaimFor(triage) = %+v, %v; want nothing", got, err)
+	}
+	got, err := q.ClaimFor(ctx, "r/1", "gpu", []string{"chat"})
+	if err != nil || got == nil || got.ID != chat.ID || got.Runner != "r/1" || got.Model != "gpu" {
+		t.Fatalf("ClaimFor(chat) = %+v, %v", got, err)
+	}
+	if other, err := q.ClaimFor(ctx, "r/2", "gpu", []string{"review"}); err != nil || other != nil {
+		t.Fatalf("ClaimFor beyond the limit = %+v, %v", other, err)
+	}
+
+	// The runner renews its lease; a stale one, or a superseded job, is
+	// refused.
+	now = now.Add(time.Minute)
+	if err := q.Heartbeat(ctx, chat.ID, got.Lease); err != nil {
+		t.Errorf("Heartbeat = %v", err)
+	}
+	if err := q.Heartbeat(ctx, chat.ID, "stale"); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Heartbeat with a stale lease = %v, want ErrLeaseLost", err)
+	}
+	now = now.Add(LeaseTTL - time.Second)
+	if requeued, _, err := s.Reap(ctx, 3); err != nil || requeued != 0 {
+		t.Errorf("Reap = %d, %v; want the renewed lease kept", requeued, err)
+	}
+
+	// Released at the runner's shutdown, the job is queued again.
+	if err := q.Release(ctx, chat.ID, got.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := s.Get(ctx, chat.ID); j.Status != Queued || j.Lease != "" {
+		t.Errorf("released job = %+v, want queued", j)
+	}
+	if err := q.Release(ctx, chat.ID, got.Lease); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("second Release = %v, want ErrLeaseLost", err)
+	}
+
+	// A superseded job tells its runner to stop.
+	held, err := q.ClaimFor(ctx, "r/1", "gpu", []string{"review"})
+	if err != nil || held.ID != review.ID {
+		t.Fatalf("ClaimFor(review) = %+v, %v", held, err)
+	}
+	if _, _, err := q.Enqueue(ctx, NewJob{Kind: "review", GroupKey: "a", DedupeKey: "a@newer", Payload: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Heartbeat(ctx, review.ID, held.Lease); !errors.Is(err, ErrNotRunning) {
+		t.Errorf("Heartbeat of a superseded job = %v, want ErrNotRunning", err)
+	}
+	if status, err := q.Finish(ctx, review.ID, held.Lease, Succeeded, nil, ""); err != nil || status != Superseded {
+		t.Errorf("Finish = %s, %v; want superseded", status, err)
+	}
+
+	// A job that outlived the job timeout is no longer renewed.
+	late, err := q.ClaimFor(ctx, "r/1", "gpu", []string{"chat"})
+	if err != nil || late == nil {
+		t.Fatalf("ClaimFor = %+v, %v", late, err)
+	}
+	now = now.Add(10*time.Minute + LeaseTTL + time.Second)
+	if err := q.Heartbeat(ctx, late.ID, late.Lease); !errors.Is(err, ErrTimedOut) {
+		t.Errorf("Heartbeat past the timeout = %v, want ErrTimedOut", err)
+	}
+}
+
+func TestReleaseExhaustsAttempts(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	j, _, _, _ := s.Enqueue(ctx, newJob("a"))
+	for range 3 {
+		got, err := s.Claim(ctx, ClaimSpec{Runner: "r", LeaseTTL: time.Minute})
+		if err != nil || got == nil {
+			t.Fatalf("Claim = %+v, %v", got, err)
+		}
+		if err := s.Release(ctx, j.ID, got.Lease, 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := s.Get(ctx, j.ID); got.Status != Failed || got.Error != "interrupted too many times" || got.FinishedAt == nil {
+		t.Errorf("job released 3 times = %+v, want failed", got)
+	}
+}
+
 func TestStepsAndPrune(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

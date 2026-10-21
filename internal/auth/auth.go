@@ -32,7 +32,8 @@ type Keys struct {
 }
 
 // ParseKeys parses "name=key,name=key". perMinute is the sustained request
-// rate allowed per key, with a burst of the same size.
+// rate allowed per key, with a burst of the same size; zero does not
+// limit it.
 func ParseKeys(s string, perMinute int) (*Keys, error) {
 	k := &Keys{}
 	seen := map[string]bool{}
@@ -53,11 +54,11 @@ func ParseKeys(s string, perMinute int) (*Keys, error) {
 			return nil, fmt.Errorf("duplicate API key name %q", name)
 		}
 		seen[name] = true
-		k.entries = append(k.entries, entry{
-			name:    name,
-			hash:    sha256.Sum256([]byte(key)),
-			limiter: rate.NewLimiter(rate.Every(time.Minute/time.Duration(perMinute)), perMinute),
-		})
+		limiter := rate.NewLimiter(rate.Inf, 0)
+		if perMinute > 0 {
+			limiter = rate.NewLimiter(rate.Every(time.Minute/time.Duration(perMinute)), perMinute)
+		}
+		k.entries = append(k.entries, entry{name: name, hash: sha256.Sum256([]byte(key)), limiter: limiter})
 	}
 	if len(k.entries) == 0 {
 		return nil, errors.New("no API keys configured")

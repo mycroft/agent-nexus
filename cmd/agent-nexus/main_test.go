@@ -41,7 +41,7 @@ models:
 	a := &app{cfg: config.Config{Models: ms}, log: slog.New(slog.DiscardHandler), reviewer: &review.Reviewer{}}
 
 	// Without Zulip, no model serves chat.
-	got, err := a.jobModels(nil)
+	got, err := a.jobModels(nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ models:
 		t.Errorf("big handlers = %+v", hs)
 	}
 
-	withZulip, err := a.jobModels(zulip.New("https://zulip.example.com", "bot@example.com", "key"))
+	withZulip, err := a.jobModels(zulip.New("https://zulip.example.com", "bot@example.com", "key"), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,9 +82,19 @@ models:
 		t.Errorf("small handlers = %+v", hs)
 	}
 
+	// Without runners, every kind must run here: the gpu model's reviews
+	// would wait for ever.
+	a.cfg.Models = parseModels(t, "models:\n  - name: a\n    baseURL: http://llm/v1\n    model: m\n    jobs: [discussion]\n  - name: gpu\n    jobs: [review]\n")
+	if _, err := a.jobModels(nil, false); err == nil {
+		t.Error("jobModels accepted reviews no model runs, without runners")
+	}
+	if _, err := a.jobModels(nil, true); err != nil {
+		t.Errorf("jobModels with runners = %v", err)
+	}
+
 	// Every kind must be served by some model.
 	a.cfg.Models = parseModels(t, "models:\n  - name: a\n    baseURL: http://llm/v1\n    model: m\n    jobs: [review]\n")
-	if _, err := a.jobModels(nil); err == nil {
+	if _, err := a.jobModels(nil, true); err == nil {
 		t.Error("jobModels accepted a configuration serving no discussion")
 	}
 }

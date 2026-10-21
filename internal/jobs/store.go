@@ -373,6 +373,41 @@ func (s *Store) Finish(ctx context.Context, id int64, lease string, status Statu
 	return false, nil
 }
 
+// Renew extends lease on job id until the given time, and returns the
+// job's status. It returns ErrLeaseLost if lease no longer holds the job.
+func (s *Store) Renew(ctx context.Context, id int64, lease string, until time.Time) (Status, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx, `UPDATE jobs SET lease_until = ? WHERE id = ? AND lease = ? RETURNING status`,
+		formatTime(until), id, lease).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrLeaseLost
+	}
+	if err != nil {
+		return "", fmt.Errorf("renew lease of job %d: %w", id, err)
+	}
+	return Status(status), nil
+}
+
+// Release lets go of a job held by lease, before its end: a job left
+// running or posting is queued again, or failed once it used
+// maxAttempts. It returns ErrLeaseLost if lease no longer holds the job.
+func (s *Store) Release(ctx context.Context, id int64, lease string, maxAttempts int) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET
+			status = CASE WHEN status NOT IN ('running', 'posting') THEN status
+				WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
+			error = CASE WHEN status IN ('running', 'posting') AND attempts >= ? THEN 'interrupted too many times' ELSE error END,
+			finished_at = CASE WHEN status IN ('running', 'posting') AND attempts >= ? THEN ? ELSE finished_at END,
+			lease = NULL, lease_until = NULL
+		WHERE id = ? AND lease = ?`, maxAttempts, maxAttempts, maxAttempts, formatTime(s.now()), id, lease)
+	if err != nil {
+		return fmt.Errorf("release job %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
 // Recover runs at the controller's startup. It requeues the jobs its own
 // workers left running or posting, fails those that already used
 // maxAttempts, and releases the jobs they held. Runners' leases are

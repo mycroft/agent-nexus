@@ -189,7 +189,7 @@ func (q *Queue) Store() *Store { return q.store }
 // supersedes and wakes the workers.
 func (q *Queue) Enqueue(ctx context.Context, nj NewJob) (Job, bool, error) {
 	if !q.kinds[nj.Kind] {
-		return Job{}, false, fmt.Errorf("no model serves job kind %q", nj.Kind)
+		return Job{}, false, fmt.Errorf("%w: %q", ErrUnknownKind, nj.Kind)
 	}
 	job, created, cancelIDs, err := q.store.Enqueue(ctx, nj)
 	if err != nil {
@@ -207,6 +207,73 @@ func (q *Queue) Enqueue(ctx context.Context, nj NewJob) (Job, bool, error) {
 		q.notify()
 	}
 	return job, created, nil
+}
+
+// ErrUnknownKind is returned when enqueueing a job kind no model serves.
+var ErrUnknownKind = errors.New("no model serves this job kind")
+
+// ErrUnknownModel is returned when a runner claims for a model the
+// controller does not know.
+var ErrUnknownModel = errors.New("unknown model")
+
+// ErrTimedOut is returned when a runner renews the lease of a job that
+// outlived the job timeout: it no longer may run.
+var ErrTimedOut = errors.New("job timed out")
+
+// ClaimFor claims a job of model for runner, which can run kinds. The
+// controller's configuration bounds the claim: the model's concurrency,
+// and the kinds it serves. The lease lasts LeaseTTL unless renewed.
+func (q *Queue) ClaimFor(ctx context.Context, runner, model string, kinds []string) (*Job, error) {
+	i := slices.IndexFunc(q.models, func(m Model) bool { return m.Name == model })
+	if i < 0 {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownModel, model)
+	}
+	m := q.models[i]
+	spec := ClaimSpec{Model: m.Name, Limit: m.Concurrency, Runner: runner, LeaseTTL: LeaseTTL}
+	for _, k := range m.Kinds {
+		if slices.Contains(kinds, k) {
+			spec.Kinds = append(spec.Kinds, k)
+		}
+	}
+	if len(spec.Kinds) == 0 {
+		return nil, nil //nolint:nilnil // nothing the runner can run is not an error
+	}
+	return q.store.Claim(ctx, spec)
+}
+
+// Heartbeat renews a runner's lease on a job. It returns ErrNotRunning
+// when the job was superseded, and ErrTimedOut once it outlived the job
+// timeout, without renewing it then: either way, the runner must stop.
+func (q *Queue) Heartbeat(ctx context.Context, id int64, lease string) error {
+	job, err := q.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if job.Lease != lease {
+		return ErrLeaseLost
+	}
+	now := q.store.now()
+	if job.StartedAt != nil && now.Sub(*job.StartedAt) > q.timeout+LeaseTTL {
+		return ErrTimedOut
+	}
+	status, err := q.store.Renew(ctx, id, lease, now.Add(LeaseTTL))
+	if err != nil {
+		return err
+	}
+	if status != Running && status != Posting {
+		return ErrNotRunning
+	}
+	return nil
+}
+
+// Release gives back a job a runner stops holding (see Store.Release),
+// and wakes the workers.
+func (q *Queue) Release(ctx context.Context, id int64, lease string) error {
+	if err := q.store.Release(ctx, id, lease, maxAttempts); err != nil {
+		return err
+	}
+	q.notify()
+	return nil
 }
 
 // notify wakes every waiting worker: with per-model workers, the one

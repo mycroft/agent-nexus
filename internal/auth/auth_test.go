@@ -63,3 +63,20 @@ func TestMiddleware(t *testing.T) {
 		t.Errorf("other key → %d, name %q", code, seen)
 	}
 }
+
+func TestUnlimitedKeys(t *testing.T) {
+	keys, err := ParseKeys("runner="+keyA, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := keys.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for i := range 100 {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+keyA)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("request %d = %d, want no rate limit", i, rec.Code)
+		}
+	}
+}
