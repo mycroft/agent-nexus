@@ -38,8 +38,7 @@ func runDiscussion(t *testing.T, f *fixture) jobs.Job {
 	}
 	defer store.Close()
 	// A realistic timeout: a short one leaves the agent no time to investigate.
-	q := jobs.NewQueue(store, 1, 30*time.Minute, time.Hour, quiet)
-	q.Register(DiscussionKind, f.reviewer.DiscussionHandler())
+	q := jobs.NewQueue(store, []jobs.Model{jobs.StaticModel("m", 1, map[string]jobs.Handler{DiscussionKind: f.reviewer.DiscussionHandler()})}, 30*time.Minute, time.Hour, quiet)
 	job, _, err := q.Enqueue(ctx, jobs.NewJob{Kind: DiscussionKind, GroupKey: "g:discussion", DedupeKey: "d", KeepRunning: true,
 		Payload: DiscussionRequest{Forge: "gitea", Owner: "o", Repo: "calc", PR: 4}})
 	if err != nil {

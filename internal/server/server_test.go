@@ -40,9 +40,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *forgetest.Fake, *jobs.Store
 	}
 	t.Cleanup(func() { store.Close() })
 	log := slog.New(slog.DiscardHandler)
-	q := jobs.NewQueue(store, 1, time.Minute, time.Hour, log)
-	q.Register(review.Kind, noopHandler{})
-	q.Register(review.DiscussionKind, noopHandler{})
+	q := jobs.NewQueue(store, []jobs.Model{jobs.StaticModel("m", 1, map[string]jobs.Handler{
+		review.Kind: noopHandler{}, review.DiscussionKind: noopHandler{},
+	})}, time.Minute, time.Hour, log)
 
 	keys, err := auth.ParseKeys("test="+apiKey, 1000)
 	if err != nil {
@@ -300,7 +300,7 @@ func TestForcedPREvent(t *testing.T) {
 	ctx := context.Background()
 	_, body := post(t, srv, apiKey, event(1, head))
 	first := int64(body["job_id"].(float64))
-	if _, err := store.Claim(ctx); err != nil {
+	if _, err := store.Claim(ctx, jobs.ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Finish(ctx, first, jobs.Succeeded, nil, ""); err != nil {
@@ -331,8 +331,7 @@ func TestZulipEvent(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 	log := slog.New(slog.DiscardHandler)
-	q := jobs.NewQueue(store, 1, time.Minute, time.Hour, log)
-	q.Register(review.ChatKind, noopHandler{})
+	q := jobs.NewQueue(store, []jobs.Model{jobs.StaticModel("m", 1, map[string]jobs.Handler{review.ChatKind: noopHandler{}})}, time.Minute, time.Hour, log)
 	z := zuliptest.New(t)
 	keys, err := auth.ParseKeys("test="+apiKey, 1000)
 	if err != nil {

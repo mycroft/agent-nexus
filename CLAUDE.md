@@ -18,9 +18,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 The flow is event → job → handler → agent → forge.
 
 - **`internal/server`:** `POST /v1/events/pr-review`. It authenticates through `internal/auth`, re-reads the PR from the forge, drops stale `head_sha` events, and enqueues the job.
-- **`internal/jobs`:** a SQLite store and worker pool.
+- **`internal/jobs`:** a SQLite store and a worker pool per model.
   - Each job has a `dedupe_key` (one live job per commit) and a `group_key` (a newer commit supersedes older jobs, and cancels them if they are running).
-  - `Checkpoint` stores the drafted review and moves the job to `posting`, so crash recovery re-posts instead of re-running the LLM.
+  - `Claim(ClaimSpec)` starts the oldest queued job of the kinds a model serves while the model is under its `Concurrency`, and records the model on the job. A `jobs.Model` without `Handlers` only takes jobs from runners. `Handlers` is retried until the model's LLM answers, so a model that is down stalls only its own jobs.
+  - `Checkpoint` stores the drafted review and moves the job to `posting`, so crash recovery re-posts instead of re-running the LLM. A requeued job with a checkpoint is claimed as `posting`, outside the model's limit.
   - A schema change is a new numbered file in `internal/jobs/migrations/`. Files apply in name order and are recorded in `schema_migrations`.
 - **`internal/review`:** the `pr_review` handler.
   - `Draft` gathers the PR, diff and base-branch `AGENTS.md`, runs the agent, then makes one final schema-constrained call.
@@ -38,6 +39,7 @@ The flow is event → job → handler → agent → forge.
 - **`internal/agent`:** the tool-calling loop. It records the transcript and elides old tool output as the conversation nears the context window. It also stops investigating when the context's deadline (`JOB_TIMEOUT`) leaves time only for another turn and the final answer, each estimated at the slowest turn so far, so a slow model yields a shorter review, not a timed-out job. `Finish` likewise skips its remaining cache-friendly retries for the schema-constrained fallback (no thinking, always parses) when no time is left for another call. In the last three turns, by the turn limit or the deadline, the loop tells the model how many it has left (`turnsLeftNote`), so it concludes rather than being cut short.
 - **`internal/llm`:** a hand-rolled OpenAI-compatible client, with llama-server extras (`reasoning_content`, `chat_template_kwargs`, `thinking_budget_tokens` from `LLM_THINKING_BUDGET`, `/props`). Only sampling parameters may vary between the calls of a conversation: anything that changes the rendered prompt (tools, template kwargs) costs llama-server its prompt cache.
 - **`internal/httpclient`:** the retrying client of the forge, LLM and Zulip clients. It retries network errors, 429 and 5xx on GET, HEAD and DELETE. Only the LLM client retries POSTs (`WithRetryPOST`).
+- **`internal/models`:** the LLMs jobs run on. `MODELS_CONFIG` names a YAML file (`LoadConfig`, like `internal/mcp`); without it, `LLM_*` configure one model named `default`. `main` builds one handler set per model through `Reviewer.WithModel`.
 - **`internal/config`:** every setting is an env var read by `config.Load`. A new one usually also goes in README's table, the chart's `values.yaml` and `templates/statefulset.yaml`.
 - **`internal/gitrepo`:** a bare-repo cache plus a hardened git CLI wrapper. Nothing is ever checked out.
 - **`internal/tools`:** read-only tools over git objects: `Commit` at a commit, `Repo` adds a pull request's `get_file_diff`.

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -18,6 +20,9 @@ const (
 	maxAttempts  = 3
 	pollInterval = 30 * time.Second
 	pruneEvery   = 24 * time.Hour
+	// maxReadyBackoff caps the wait between two attempts to set up a
+	// model whose LLM is unreachable.
+	maxReadyBackoff = 5 * time.Minute
 )
 
 // Result is a handler's outcome for a job that did not fail.
@@ -58,46 +63,76 @@ func (r *Run) Checkpoint(ctx context.Context, data any) error {
 	return r.store.Checkpoint(ctx, r.id, raw)
 }
 
-// Queue runs stored jobs on a pool of workers.
-type Queue struct {
-	store     *Store
-	handlers  map[string]Handler
-	workers   int
-	timeout   time.Duration
-	retention time.Duration
-	log       *slog.Logger
-	wake      chan struct{}
-
-	mu      sync.Mutex
-	running map[int64]context.CancelFunc
+// Model is an LLM jobs run on.
+type Model struct {
+	Name string
+	// Concurrency bounds the model's jobs running at once.
+	Concurrency int
+	// Kinds are the job kinds the model serves.
+	Kinds []string
+	// Handlers, if set, runs the model's jobs in this process. It returns
+	// each kind's handler once the model can be used, and is retried until
+	// then. Without it, the model's jobs wait for a runner.
+	Handlers func(context.Context) (map[string]Handler, error)
 }
 
-// NewQueue returns a queue with the given number of workers. timeout bounds
-// one job; retention is how long transcripts are kept.
-func NewQueue(store *Store, workers int, timeout, retention time.Duration, log *slog.Logger) *Queue {
-	return &Queue{
-		store:     store,
-		handlers:  map[string]Handler{},
-		workers:   workers,
-		timeout:   timeout,
-		retention: retention,
-		log:       log,
-		wake:      make(chan struct{}, 1),
-		running:   map[int64]context.CancelFunc{},
+// StaticModel returns a model running handlers in this process, from the
+// start.
+func StaticModel(name string, concurrency int, handlers map[string]Handler) Model {
+	return Model{
+		Name: name, Concurrency: concurrency, Kinds: slices.Sorted(maps.Keys(handlers)),
+		Handlers: func(context.Context) (map[string]Handler, error) { return handlers, nil },
 	}
 }
 
-// Register sets the handler for a job kind. Call before Run.
-func (q *Queue) Register(kind string, h Handler) { q.handlers[kind] = h }
+// Queue runs stored jobs on a pool of workers per model.
+type Queue struct {
+	store     *Store
+	models    []Model
+	kinds     map[string]bool
+	timeout   time.Duration
+	retention time.Duration
+	log       *slog.Logger
+	// readyBackoff is the first wait before retrying a model's Handlers.
+	readyBackoff time.Duration
+
+	mu      sync.Mutex
+	running map[int64]context.CancelFunc
+	// changed is closed, and replaced, when a job may have become
+	// claimable.
+	changed chan struct{}
+}
+
+// NewQueue returns a queue running the jobs of models. timeout bounds one
+// job; retention is how long transcripts are kept.
+func NewQueue(store *Store, models []Model, timeout, retention time.Duration, log *slog.Logger) *Queue {
+	q := &Queue{
+		store:        store,
+		models:       models,
+		kinds:        map[string]bool{},
+		timeout:      timeout,
+		retention:    retention,
+		log:          log,
+		readyBackoff: 5 * time.Second,
+		running:      map[int64]context.CancelFunc{},
+		changed:      make(chan struct{}),
+	}
+	for _, m := range models {
+		for _, k := range m.Kinds {
+			q.kinds[k] = true
+		}
+	}
+	return q
+}
 
 // Store returns the underlying store.
 func (q *Queue) Store() *Store { return q.store }
 
 // Enqueue stores a job (see Store.Enqueue), cancels the running jobs it
-// supersedes and wakes a worker.
+// supersedes and wakes the workers.
 func (q *Queue) Enqueue(ctx context.Context, nj NewJob) (Job, bool, error) {
-	if _, ok := q.handlers[nj.Kind]; !ok {
-		return Job{}, false, fmt.Errorf("no handler for job kind %q", nj.Kind)
+	if !q.kinds[nj.Kind] {
+		return Job{}, false, fmt.Errorf("no model serves job kind %q", nj.Kind)
 	}
 	job, created, cancelIDs, err := q.store.Enqueue(ctx, nj)
 	if err != nil {
@@ -112,17 +147,27 @@ func (q *Queue) Enqueue(ctx context.Context, nj NewJob) (Job, bool, error) {
 	}
 	q.mu.Unlock()
 	if created {
-		q.signal()
+		q.notify()
 	}
 	return job, created, nil
 }
 
-// signal wakes an idle worker, if any.
-func (q *Queue) signal() {
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
+// notify wakes every waiting worker: with per-model workers, the one
+// woken must be one that can take the job.
+func (q *Queue) notify() {
+	q.mu.Lock()
+	close(q.changed)
+	q.changed = make(chan struct{})
+	q.mu.Unlock()
+}
+
+// Changed returns a channel closed the next time a job may become
+// claimable. Take it before claiming, so a change in between is not
+// missed.
+func (q *Queue) Changed() <-chan struct{} {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.changed
 }
 
 // Run recovers interrupted jobs, then processes jobs until ctx is done.
@@ -138,35 +183,83 @@ func (q *Queue) Run(ctx context.Context) error {
 	}
 
 	var wg sync.WaitGroup
-	for range q.workers {
-		wg.Go(func() { q.work(ctx) })
+	for _, m := range q.models {
+		if m.Handlers != nil {
+			wg.Go(func() { q.serve(ctx, m) })
+		}
 	}
 	wg.Go(func() { q.prune(ctx) })
 	wg.Wait()
 	return nil
 }
 
-func (q *Queue) work(ctx context.Context) {
+// serve runs the model's workers once its handlers are ready.
+func (q *Queue) serve(ctx context.Context, m Model) {
+	handlers := q.ready(ctx, m)
+	if handlers == nil {
+		return
+	}
+	spec := ClaimSpec{Model: m.Name, Limit: m.Concurrency}
+	for _, k := range m.Kinds {
+		if handlers[k] != nil {
+			spec.Kinds = append(spec.Kinds, k)
+		}
+	}
+	if len(spec.Kinds) == 0 {
+		q.log.WarnContext(ctx, "model has no handler for the kinds it serves", "model", m.Name, "kinds", m.Kinds)
+		return
+	}
+	var wg sync.WaitGroup
+	for range m.Concurrency {
+		wg.Go(func() { q.work(ctx, spec, handlers) })
+	}
+	wg.Wait()
+}
+
+// ready calls m.Handlers until it succeeds, backing off between attempts.
+// It returns nil once ctx is done.
+func (q *Queue) ready(ctx context.Context, m Model) map[string]Handler {
+	wait := q.readyBackoff
 	for {
-		job, err := q.store.Claim(ctx)
+		handlers, err := m.Handlers(ctx)
+		if err == nil {
+			return handlers
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		q.log.WarnContext(ctx, "model not ready; its jobs wait", "model", m.Name, "retry_in", wait, "error", err)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+		wait = min(2*wait, maxReadyBackoff)
+	}
+}
+
+func (q *Queue) work(ctx context.Context, spec ClaimSpec, handlers map[string]Handler) {
+	for {
+		changed := q.Changed()
+		job, err := q.store.Claim(ctx, spec)
 		if err != nil && ctx.Err() == nil {
-			q.log.ErrorContext(ctx, "claim job", "error", err)
+			q.log.ErrorContext(ctx, "claim job", "model", spec.Model, "error", err)
 		}
 		if job != nil {
-			q.process(ctx, job)
+			q.process(ctx, job, handlers[job.Kind])
 			continue
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-q.wake:
+		case <-changed:
 		case <-time.After(pollInterval):
 		}
 	}
 }
 
-func (q *Queue) process(ctx context.Context, job *Job) {
-	log := q.log.With("job", job.ID, "kind", job.Kind, "attempt", job.Attempts)
+func (q *Queue) process(ctx context.Context, job *Job, h Handler) {
+	log := q.log.With("job", job.ID, "kind", job.Kind, "model", job.Model, "attempt", job.Attempts)
 	jobCtx, cancel := context.WithTimeout(ctx, q.timeout)
 	defer cancel()
 	q.mu.Lock()
@@ -180,9 +273,10 @@ func (q *Queue) process(ctx context.Context, job *Job) {
 
 	start := time.Now()
 	log.InfoContext(ctx, "job started")
-	// Jobs of the same group wait for this one: wake a worker when it ends.
-	defer q.signal()
-	result, err := q.handle(jobCtx, job)
+	// Jobs of the same group, and of the model, wait for this one: wake
+	// the workers when it ends.
+	defer q.notify()
+	result, err := q.handle(jobCtx, h, job)
 	if ctx.Err() != nil {
 		log.WarnContext(ctx, "job interrupted by shutdown; it will be requeued on restart")
 		return
@@ -218,14 +312,13 @@ func (q *Queue) process(ctx context.Context, job *Job) {
 	log.InfoContext(ctx, "job finished", "status", status, "duration", time.Since(start))
 }
 
-func (q *Queue) handle(ctx context.Context, job *Job) (res Result, err error) { //nolint:nonamedreturns // needed to convert a handler panic into an error
+func (q *Queue) handle(ctx context.Context, h Handler, job *Job) (res Result, err error) { //nolint:nonamedreturns // needed to convert a handler panic into an error
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("handler panic: %v", p)
 		}
 	}()
-	h, ok := q.handlers[job.Kind]
-	if !ok {
+	if h == nil {
 		return Result{}, fmt.Errorf("no handler for job kind %q", job.Kind)
 	}
 	res, err = h.Handle(ctx, job, &Run{store: q.store, id: job.ID, log: q.log})

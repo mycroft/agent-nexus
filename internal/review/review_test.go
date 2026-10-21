@@ -378,7 +378,7 @@ func TestHandleThroughQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Claim(ctx); err != nil {
+	if _, err := store.Claim(ctx, jobs.ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint := Draft{HeadSHA: f.remote.HeadSHA, Review: forge.NewReview{CommitSHA: f.remote.HeadSHA, Body: "from checkpoint " + marker(f.remote.HeadSHA)}}
@@ -387,8 +387,7 @@ func TestHandleThroughQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	q := jobs.NewQueue(store, 1, 30*time.Minute, time.Hour, quiet)
-	q.Register(Kind, f.reviewer)
+	q := jobs.NewQueue(store, []jobs.Model{jobs.StaticModel("m", 1, map[string]jobs.Handler{Kind: f.reviewer})}, 30*time.Minute, time.Hour, quiet)
 	done := make(chan error)
 	go func() { done <- q.Run(ctx) }()
 

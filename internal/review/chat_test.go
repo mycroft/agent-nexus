@@ -165,8 +165,7 @@ func (f *chatFixture) run(t *testing.T, m zulip.Message) jobs.Job {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	q := jobs.NewQueue(store, 1, 30*time.Minute, time.Hour, quiet)
-	q.Register(ChatKind, f.chat)
+	q := jobs.NewQueue(store, []jobs.Model{jobs.StaticModel("m", 1, map[string]jobs.Handler{ChatKind: f.chat})}, 30*time.Minute, time.Hour, quiet)
 	conv, err := zulip.ConversationOf(m, zuliptest.Bot.Email)
 	if err != nil {
 		t.Fatal(err)
@@ -399,8 +398,7 @@ func TestChatInterruptedByShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	queue := jobs.NewQueue(store, 1, 30*time.Minute, time.Hour, quiet)
-	queue.Register(ChatKind, f.chat)
+	queue := jobs.NewQueue(store, []jobs.Model{jobs.StaticModel("m", 1, map[string]jobs.Handler{ChatKind: f.chat})}, 30*time.Minute, time.Hour, quiet)
 	conv, _ := zulip.ConversationOf(q, zuliptest.Bot.Email)
 	job, _, err := queue.Enqueue(ctx, ChatJob(conv, q.ID, q.SenderFullName))
 	if err != nil {

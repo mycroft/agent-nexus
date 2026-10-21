@@ -53,9 +53,11 @@ type Job struct {
 	Error      string          `json:"error,omitempty"`
 	Attempts   int             `json:"attempts"`
 	APIKeyName string          `json:"api_key_name,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	StartedAt  *time.Time      `json:"started_at,omitempty"`
-	FinishedAt *time.Time      `json:"finished_at,omitempty"`
+	// Model is the model the job ran on, set when it is claimed.
+	Model      string     `json:"model,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 // NewJob describes a job to enqueue.
@@ -164,7 +166,7 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 const jobColumns = `id, kind, group_key, dedupe_key, status, payload, checkpoint, result, error,
-	attempts, api_key_name, created_at, started_at, finished_at`
+	attempts, api_key_name, model, created_at, started_at, finished_at`
 
 // Enqueue inserts a job unless a live job (queued, running, posting or
 // succeeded) has the same dedupe key, in which case that job is returned
@@ -238,16 +240,45 @@ func supersede(ctx context.Context, tx *sql.Tx, group string, keepRunning bool, 
 	return started, nil
 }
 
-// Claim marks the oldest queued job as running and returns it, or nil
+// ClaimSpec restricts the jobs Claim may start. Zero fields restrict
+// nothing.
+type ClaimSpec struct {
+	// Model is the model the claimed job runs on. Limit, if positive,
+	// bounds the jobs running on it at once.
+	Model string
+	Limit int
+	// Kinds are the job kinds the claimer can run.
+	Kinds []string
+}
+
+// Claim starts the oldest queued job spec allows, and returns it, or nil
 // when no job can start. A job waits while another job of its group is
 // running or posting, so jobs about one subject never run concurrently.
-func (s *Store) Claim(ctx context.Context) (*Job, error) {
-	job, err := scanJob(s.db.QueryRowContext(ctx, `UPDATE jobs
-		SET status = 'running', started_at = ?, attempts = attempts + 1
+//
+// A job with a checkpoint only has its result left to post, without the
+// model: it is claimed as posting, outside the model's limit, and keeps
+// the model that drafted it.
+func (s *Store) Claim(ctx context.Context, spec ClaimSpec) (*Job, error) {
+	args := []any{formatTime(s.now()), spec.Model}
+	query := `UPDATE jobs
+		SET status = CASE WHEN checkpoint IS NULL THEN 'running' ELSE 'posting' END,
+			started_at = ?, attempts = attempts + 1,
+			model = CASE WHEN checkpoint IS NULL THEN ? ELSE model END
 		WHERE id = (SELECT q.id FROM jobs q WHERE q.status = 'queued'
-			AND NOT EXISTS (SELECT 1 FROM jobs b WHERE b.group_key = q.group_key AND b.status IN ('running', 'posting'))
-			ORDER BY q.id LIMIT 1)
-		RETURNING `+jobColumns, formatTime(s.now())))
+			AND NOT EXISTS (SELECT 1 FROM jobs b WHERE b.group_key = q.group_key AND b.status IN ('running', 'posting'))`
+	if len(spec.Kinds) > 0 {
+		query += ` AND q.kind IN (` + placeholders(len(spec.Kinds)) + `)`
+		for _, k := range spec.Kinds {
+			args = append(args, k)
+		}
+	}
+	if spec.Limit > 0 {
+		query += ` AND (q.checkpoint IS NOT NULL OR
+			(SELECT COUNT(*) FROM jobs r WHERE r.status = 'running' AND r.model = ?) < ?)`
+		args = append(args, spec.Model, spec.Limit)
+	}
+	query += ` ORDER BY q.id LIMIT 1) RETURNING ` + jobColumns
+	job, err := scanJob(s.db.QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil //nolint:nilnil // an empty queue is not an error
 	}
@@ -390,7 +421,7 @@ func scanJob(row rowScanner) (Job, error) {
 		checkpoint, result []byte
 	)
 	err := row.Scan(&j.ID, &j.Kind, &j.GroupKey, &j.DedupeKey, &status, &j.Payload, &checkpoint, &result,
-		&j.Error, &j.Attempts, &j.APIKeyName, &created, &started, &finished)
+		&j.Error, &j.Attempts, &j.APIKeyName, &j.Model, &created, &started, &finished)
 	if err != nil {
 		return Job{}, err
 	}

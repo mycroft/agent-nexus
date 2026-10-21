@@ -135,6 +135,15 @@ type Reviewer struct {
 	Logger  *slog.Logger
 }
 
+// WithModel returns a copy of r whose jobs run on the given model: llm
+// answers as model (the upstream identifier, shown in the review footer)
+// within contextTokens.
+func (r *Reviewer) WithModel(llm agent.Completer, model string, contextTokens int) *Reviewer {
+	c := *r
+	c.LLM, c.Model, c.ContextTokens = llm, model, contextTokens
+	return &c
+}
+
 // Handle implements jobs.Handler.
 func (r *Reviewer) Handle(ctx context.Context, job *jobs.Job, run *jobs.Run) (jobs.Result, error) {
 	var req Request

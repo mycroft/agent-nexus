@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mycroft/agent-nexus/internal/models"
 )
 
 // Config holds all environment-derived runtime settings.
@@ -51,21 +53,12 @@ type Config struct {
 	// configuration, parsed by review.ParseModeRules.
 	ReviewModes string
 
-	LLMBaseURL string
-	LLMAPIKey  string
-	LLMModel   string
-	// LLMContextTokens overrides the context size discovered from
-	// llama-server's /props endpoint. Zero means discover.
-	LLMContextTokens int
-	// LLMThinkingBudget caps the model's reasoning per request, in tokens.
-	// Zero leaves llama-server's default.
-	LLMThinkingBudget int
-	// LLMConcurrency is the number of jobs run in parallel; match
-	// llama-server's --parallel.
-	LLMConcurrency int
-	// LLMRequestTimeout bounds one chat completion, including the time
-	// llama-server keeps it queued while all slots are busy.
-	LLMRequestTimeout time.Duration
+	// ModelsConfig is the path of the models' YAML configuration, parsed
+	// by models.LoadConfig. Empty configures one model from the LLM_*
+	// variables.
+	ModelsConfig string
+	// Models are the LLMs jobs run on, from ModelsConfig or LLM_*.
+	Models []models.Model
 
 	// AgentMaxTurns bounds the tool-calling loop of one job.
 	AgentMaxTurns int
@@ -108,9 +101,7 @@ func Load() (Config, error) {
 		APIKeys:             os.Getenv("API_KEYS"),
 		AllowedOwners:       splitList(os.Getenv("ALLOWED_OWNERS")),
 		ReviewModes:         os.Getenv("REVIEW_MODES"),
-		LLMBaseURL:          os.Getenv("LLM_BASE_URL"),
-		LLMAPIKey:           os.Getenv("LLM_API_KEY"),
-		LLMModel:            os.Getenv("LLM_MODEL"),
+		ModelsConfig:        os.Getenv("MODELS_CONFIG"),
 		GiteaURL:            strings.TrimRight(os.Getenv("GITEA_URL"), "/"),
 		GiteaUser:           os.Getenv("GITEA_USER"),
 		GiteaToken:          os.Getenv("GITEA_TOKEN"),
@@ -127,19 +118,7 @@ func Load() (Config, error) {
 	if c.EventsPerMinute, err = getEnvPositiveInt("EVENTS_PER_MINUTE", 30); err != nil {
 		return Config{}, err
 	}
-	if c.LLMContextTokens, err = getEnvInt("LLM_CONTEXT_TOKENS", 0); err != nil {
-		return Config{}, err
-	}
-	if c.LLMThinkingBudget, err = getEnvInt("LLM_THINKING_BUDGET", 0); err != nil {
-		return Config{}, err
-	}
-	if c.LLMConcurrency, err = getEnvPositiveInt("LLM_CONCURRENCY", 1); err != nil {
-		return Config{}, err
-	}
 	if c.AgentMaxTurns, err = getEnvPositiveInt("AGENT_MAX_TURNS", 30); err != nil {
-		return Config{}, err
-	}
-	if c.LLMRequestTimeout, err = getEnvDuration("LLM_REQUEST_TIMEOUT", 10*time.Minute); err != nil {
 		return Config{}, err
 	}
 	if c.JobTimeout, err = getEnvDuration("JOB_TIMEOUT", 30*time.Minute); err != nil {
@@ -154,11 +133,8 @@ func Load() (Config, error) {
 		}
 	}
 
-	if c.LLMBaseURL == "" {
-		return Config{}, errors.New("LLM_BASE_URL is required")
-	}
-	if c.LLMModel == "" {
-		return Config{}, errors.New("LLM_MODEL is required")
+	if c.Models, err = loadModels(c.ModelsConfig); err != nil {
+		return Config{}, err
 	}
 	if err := requireAllOrNone("Gitea", map[string]string{
 		"GITEA_URL":   c.GiteaURL,
@@ -189,6 +165,47 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// llmVariables configure the one model of a deployment without a models
+// file.
+var llmVariables = []string{
+	"LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_CONTEXT_TOKENS",
+	"LLM_THINKING_BUDGET", "LLM_CONCURRENCY", "LLM_REQUEST_TIMEOUT",
+}
+
+// loadModels reads the models file at path, or without one, the model
+// the LLM_* variables configure. Both at once would leave one ignored.
+func loadModels(path string) ([]models.Model, error) {
+	if path != "" {
+		for _, key := range llmVariables {
+			if os.Getenv(key) != "" {
+				return nil, fmt.Errorf("%s and MODELS_CONFIG are exclusive: configure the models in MODELS_CONFIG", key)
+			}
+		}
+		return models.LoadConfig(path)
+	}
+	m := models.Model{BaseURL: os.Getenv("LLM_BASE_URL"), Model: os.Getenv("LLM_MODEL")}
+	if m.BaseURL == "" {
+		return nil, errors.New("LLM_BASE_URL is required (or MODELS_CONFIG)")
+	}
+	if m.Model == "" {
+		return nil, errors.New("LLM_MODEL is required")
+	}
+	var err error
+	if m.ContextTokens, err = getEnvInt("LLM_CONTEXT_TOKENS", 0); err != nil {
+		return nil, err
+	}
+	if m.ThinkingBudget, err = getEnvInt("LLM_THINKING_BUDGET", 0); err != nil {
+		return nil, err
+	}
+	if m.Concurrency, err = getEnvPositiveInt("LLM_CONCURRENCY", 1); err != nil {
+		return nil, err
+	}
+	if m.RequestTimeout, err = getEnvDuration("LLM_REQUEST_TIMEOUT", models.DefaultRequestTimeout); err != nil {
+		return nil, err
+	}
+	return models.Default(m, os.Getenv("LLM_API_KEY"))
 }
 
 // GiteaEnabled reports whether the Gitea forge is configured.

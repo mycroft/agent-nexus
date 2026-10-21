@@ -40,7 +40,7 @@ func TestEnqueueDedupeAndSupersede(t *testing.T) {
 
 	// Claim a, then a newer commit arrives: a is superseded and reported
 	// for cancellation.
-	claimed, err := s.Claim(ctx)
+	claimed, err := s.Claim(ctx, ClaimSpec{})
 	if err != nil || claimed.ID != a.ID || claimed.Status != Running || claimed.Attempts != 1 {
 		t.Fatalf("Claim = %+v, %v", claimed, err)
 	}
@@ -63,7 +63,7 @@ func TestEnqueueDedupeAndSupersede(t *testing.T) {
 	}
 
 	// A failed job does not block re-enqueueing the same commit.
-	if _, err := s.Claim(ctx); err != nil {
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Finish(ctx, b.ID, Failed, nil, "boom"); err != nil {
@@ -75,7 +75,7 @@ func TestEnqueueDedupeAndSupersede(t *testing.T) {
 	}
 
 	// A succeeded job does.
-	if _, err := s.Claim(ctx); err != nil {
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Finish(ctx, retry.ID, Succeeded, []byte(`{"ok":true}`), ""); err != nil {
@@ -93,13 +93,13 @@ func TestRecover(t *testing.T) {
 
 	posting, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "g1", DedupeKey: "d1", Payload: 1})
 	running, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "g2", DedupeKey: "d2", Payload: 2})
-	if _, err := s.Claim(ctx); err != nil {
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Checkpoint(ctx, posting.ID, []byte(`{"draft":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Claim(ctx); err != nil {
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -115,7 +115,7 @@ func TestRecover(t *testing.T) {
 	// Two more interrupted runs exhaust the attempts of the running job.
 	for range 2 {
 		for range 2 {
-			if _, err := s.Claim(ctx); err != nil {
+			if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -125,6 +125,77 @@ func TestRecover(t *testing.T) {
 	}
 	if got, _ := s.Get(ctx, running.ID); got.Status != Failed {
 		t.Errorf("job interrupted 3 times has status %s, want failed", got.Status)
+	}
+}
+
+func TestClaimByModel(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	enqueue := func(kind, group string) Job {
+		t.Helper()
+		j, _, _, err := s.Enqueue(ctx, NewJob{Kind: kind, GroupKey: group, DedupeKey: group, Payload: group})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	review1 := enqueue("pr_review", "a")
+	chat := enqueue("chat_question", "b")
+	review2 := enqueue("pr_review", "c")
+
+	small := ClaimSpec{Model: "small", Limit: 1, Kinds: []string{"chat_question"}}
+	big := ClaimSpec{Model: "big", Limit: 1, Kinds: []string{"pr_review", "chat_question"}}
+
+	// A model only takes the kinds it serves, oldest first.
+	if got, err := s.Claim(ctx, small); err != nil || got == nil || got.ID != chat.ID || got.Model != "small" {
+		t.Fatalf("Claim(small) = %+v, %v; want the chat job", got, err)
+	}
+	if got, err := s.Claim(ctx, small); err != nil || got != nil {
+		t.Fatalf("Claim(small) = %+v, %v; want nothing at its limit", got, err)
+	}
+	if got, err := s.Claim(ctx, big); err != nil || got == nil || got.ID != review1.ID || got.Model != "big" {
+		t.Fatalf("Claim(big) = %+v, %v; want the first review", got, err)
+	}
+	// The limit counts the model's running jobs, whoever claimed them.
+	if got, err := s.Claim(ctx, big); err != nil || got != nil {
+		t.Fatalf("Claim(big) = %+v, %v; want nothing at its limit", got, err)
+	}
+	if _, err := s.Finish(ctx, review1.ID, Succeeded, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Claim(ctx, big); err != nil || got == nil || got.ID != review2.ID {
+		t.Fatalf("Claim(big) = %+v, %v; want the second review once the first finished", got, err)
+	}
+}
+
+func TestClaimCheckpointedJob(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	drafted, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "a", DedupeKey: "a", Payload: 1})
+	spec := ClaimSpec{Model: "m", Limit: 1}
+	if _, err := s.Claim(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Checkpoint(ctx, drafted.ID, []byte(`{"draft":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Recover(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	busy, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "b", DedupeKey: "b", Payload: 2})
+	if got, err := s.Claim(ctx, ClaimSpec{Model: "other", Limit: 1}); err != nil || got.ID != drafted.ID {
+		t.Fatalf("Claim = %+v, %v; want the drafted job", got, err)
+	}
+
+	// The drafted job only has its review left to post: it is claimed as
+	// posting, so it is neither superseded nor counted against the model,
+	// and keeps the model that drafted it.
+	got, _ := s.Get(ctx, drafted.ID)
+	if got.Status != Posting || got.Model != "m" || string(got.Checkpoint) != `{"draft":1}` {
+		t.Errorf("drafted job = %+v, want posting on m with its checkpoint", got)
+	}
+	if got, err := s.Claim(ctx, ClaimSpec{Model: "other", Limit: 1}); err != nil || got == nil || got.ID != busy.ID {
+		t.Errorf("Claim = %+v, %v; want the other job, the posting one using no slot", got, err)
 	}
 }
 
@@ -187,10 +258,8 @@ func TestQueueRunsAndSupersedes(t *testing.T) {
 	defer cancel()
 	s := openTestStore(t)
 	log := slog.New(slog.DiscardHandler)
-	q := NewQueue(s, 1, time.Minute, time.Hour, log)
-
 	started := make(chan int64, 4)
-	q.Register("k", handlerFunc(func(ctx context.Context, job *Job, run *Run) (Result, error) {
+	h := handlerFunc(func(ctx context.Context, job *Job, run *Run) (Result, error) {
 		var p map[string]string
 		_ = json.Unmarshal(job.Payload, &p)
 		run.Record(ctx, Step{Role: "user", Content: p["sha"]})
@@ -206,7 +275,8 @@ func TestQueueRunsAndSupersedes(t *testing.T) {
 			return Result{}, err
 		}
 		return Result{Status: Succeeded, Data: map[string]string{"sha": p["sha"]}}, nil
-	}))
+	})
+	q := NewQueue(s, []Model{StaticModel("m", 1, map[string]Handler{"k": h})}, time.Minute, time.Hour, log)
 	done := make(chan error)
 	go func() { done <- q.Run(ctx) }()
 
@@ -234,8 +304,87 @@ func TestQueueRunsAndSupersedes(t *testing.T) {
 	}
 
 	if _, _, err := q.Enqueue(ctx, NewJob{Kind: "unknown", GroupKey: "x", DedupeKey: "x"}); err == nil {
-		t.Error("Enqueue accepted a kind without handler")
+		t.Error("Enqueue accepted a kind no model serves")
 	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueueModels(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := openTestStore(t)
+	log := slog.New(slog.DiscardHandler)
+
+	// Each "k" job blocks until released, and reports where it ran.
+	type start struct {
+		id    int64
+		model string
+	}
+	started := make(chan start, 8)
+	release := make(chan struct{})
+	block := handlerFunc(func(ctx context.Context, job *Job, _ *Run) (Result, error) {
+		started <- start{job.ID, job.Model}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return Result{}, ctx.Err()
+		}
+		return Result{Status: Succeeded}, nil
+	})
+	// "slow" is not ready at first: its LLM is down.
+	var attempts int
+	slow := Model{Name: "slow", Concurrency: 1, Kinds: []string{"k"}, Handlers: func(context.Context) (map[string]Handler, error) {
+		if attempts++; attempts == 1 {
+			return nil, errors.New("connection refused")
+		}
+		return map[string]Handler{"k": block}, nil
+	}}
+	// "remote" has no handlers here: only runners would take its jobs.
+	remote := Model{Name: "remote", Concurrency: 1, Kinds: []string{"r"}}
+	q := NewQueue(s, []Model{StaticModel("fast", 1, map[string]Handler{"k": block}), slow, remote}, time.Minute, time.Hour, log)
+	q.readyBackoff = 10 * time.Millisecond
+	done := make(chan error)
+	go func() { done <- q.Run(ctx) }()
+
+	var ids []int64
+	for i := range 3 {
+		j, _, err := q.Enqueue(ctx, NewJob{Kind: "k", GroupKey: fmt.Sprint("g", i), DedupeKey: fmt.Sprint("d", i), Payload: i})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, j.ID)
+	}
+	// Two jobs start, one per model; the third waits for a free slot.
+	seen := map[string]bool{}
+	for range 2 {
+		st := <-started
+		seen[st.model] = true
+	}
+	if !seen["fast"] || !seen["slow"] {
+		t.Errorf("jobs ran on %v, want one on each model", seen)
+	}
+	select {
+	case st := <-started:
+		t.Fatalf("job %d started on %s beyond the models' limits", st.id, st.model)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := waitStatus(t, s, ids[2], Queued); got.Model != "" {
+		t.Errorf("queued job model = %q", got.Model)
+	}
+	close(release)
+	waitStatus(t, s, ids[2], Succeeded)
+
+	// A kind only a runner serves is accepted, and waits.
+	r, _, err := q.Enqueue(ctx, NewJob{Kind: "r", GroupKey: "r", DedupeKey: "r", Payload: 1})
+	if err != nil {
+		t.Fatalf("Enqueue(r) = %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	waitStatus(t, s, r.ID, Queued)
+
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -249,23 +398,23 @@ func TestClaimSerializesGroups(t *testing.T) {
 		return NewJob{Kind: "k", GroupKey: "pr1:discussion", DedupeKey: "pr1@" + n, KeepRunning: true, Payload: n}
 	}
 	first, _, _, _ := s.Enqueue(ctx, pass("1"))
-	if got, err := s.Claim(ctx); err != nil || got.ID != first.ID {
+	if got, err := s.Claim(ctx, ClaimSpec{}); err != nil || got.ID != first.ID {
 		t.Fatalf("Claim = %+v, %v", got, err)
 	}
 	second, _, _, _ := s.Enqueue(ctx, pass("2"))
 	other, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "pr2", DedupeKey: "pr2@1", Payload: 1})
 
 	// The second pass of pr1 waits; another group's job does not.
-	if got, err := s.Claim(ctx); err != nil || got == nil || got.ID != other.ID {
+	if got, err := s.Claim(ctx, ClaimSpec{}); err != nil || got == nil || got.ID != other.ID {
 		t.Fatalf("Claim = %+v, %v; want the other group's job", got, err)
 	}
-	if got, err := s.Claim(ctx); err != nil || got != nil {
+	if got, err := s.Claim(ctx, ClaimSpec{}); err != nil || got != nil {
 		t.Fatalf("Claim = %+v, %v; want nothing while pr1 runs", got, err)
 	}
 	if _, err := s.Finish(ctx, first.ID, Succeeded, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := s.Claim(ctx); err != nil || got == nil || got.ID != second.ID {
+	if got, err := s.Claim(ctx, ClaimSpec{}); err != nil || got == nil || got.ID != second.ID {
 		t.Fatalf("Claim = %+v, %v; want the second pass once the first finished", got, err)
 	}
 }
@@ -277,7 +426,7 @@ func TestKeepRunning(t *testing.T) {
 		return NewJob{Kind: "k", GroupKey: "g:discussion", DedupeKey: "g:discussion@" + n, KeepRunning: true, Payload: n}
 	}
 	running, _, _, _ := s.Enqueue(ctx, pass("1"))
-	if _, err := s.Claim(ctx); err != nil {
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 	queued, _, _, _ := s.Enqueue(ctx, pass("2"))
@@ -309,7 +458,7 @@ func seedJobs(t *testing.T) (*Store, time.Time, [3]int64) {
 	now = now.Add(time.Minute)
 	queued, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "pr_review", GroupKey: "c", DedupeKey: "c@1", Payload: 2})
 
-	if got, _ := s.Claim(ctx); got.ID != review.ID {
+	if got, _ := s.Claim(ctx, ClaimSpec{}); got.ID != review.ID {
 		t.Fatalf("claimed %d", got.ID)
 	}
 	for _, st := range []Step{
@@ -321,7 +470,7 @@ func seedJobs(t *testing.T) (*Store, time.Time, [3]int64) {
 			t.Fatal(err)
 		}
 	}
-	if got, _ := s.Claim(ctx); got.ID != discussion.ID {
+	if got, _ := s.Claim(ctx, ClaimSpec{}); got.ID != discussion.ID {
 		t.Fatalf("claimed %d", got.ID)
 	}
 	if _, err := s.Finish(ctx, discussion.ID, Skipped, nil, ""); err != nil {

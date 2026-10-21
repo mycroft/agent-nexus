@@ -68,13 +68,14 @@ Everything is configured through environment variables.
 
 | Variable | Default | |
 |---|---|---|
-| `LLM_BASE_URL` | required | OpenAI-compatible root, e.g. `https://llm-api.iop.cx/v1` |
+| `LLM_BASE_URL` | required without `MODELS_CONFIG` | OpenAI-compatible root, e.g. `https://llm-api.iop.cx/v1` |
 | `LLM_API_KEY` | | Bearer token for the LLM server |
-| `LLM_MODEL` | required | Model name sent with each request |
-| `LLM_CONTEXT_TOKENS` | from `/props` | Context window; set it to avoid the startup lookup |
+| `LLM_MODEL` | required without `MODELS_CONFIG` | Model name sent with each request |
+| `LLM_CONTEXT_TOKENS` | from `/props` | Context window; set it to avoid the lookup |
 | `LLM_THINKING_BUDGET` | server default | Most reasoning tokens per request (llama-server `thinking_budget_tokens`); `0` keeps the server's default |
 | `LLM_CONCURRENCY` | `1` | Parallel jobs; match llama-server `--parallel` |
 | `LLM_REQUEST_TIMEOUT` | `10m` | One completion, including time queued in llama-server |
+| `MODELS_CONFIG` | | YAML file of several models, instead of the `LLM_*` variables (see [Models](#models)) |
 | `AGENT_MAX_TURNS` | `30` | Tool-loop turns per review |
 | `JOB_TIMEOUT` | `30m` | One job end to end; the investigation stops early enough to write the review before it |
 | `API_KEYS` | required for `serve` | `name=key,name=key`, each key ≥ 32 characters |
@@ -98,6 +99,42 @@ Everything is configured through environment variables.
 | `LOG_LEVEL` | `info` | |
 
 At least one forge must be configured.
+
+## Models
+
+The `LLM_*` variables configure one model, named `default`. To run jobs
+on several LLMs, `MODELS_CONFIG` names a YAML file listing them instead;
+setting both is an error.
+
+```yaml
+models:
+  - name: qwen            # lowercase letters and digits
+    baseURL: https://llm-api.iop.cx/llama.cpp/v1
+    model: Swift Uncensored Qwen 3.8   # sent with each request, shown in reviews
+    apiKeyEnv: LLM_API_KEY_QWEN        # environment variable holding its API key
+    concurrency: 1        # jobs running on it at once; match llama-server --parallel
+    jobs: [review, discussion, chat]   # the jobs it serves; default all
+    contextTokens: 0      # 0 asks llama-server's /props
+    thinkingBudget: 0     # 0 keeps the server's default
+    requestTimeout: 10m
+  - name: small
+    baseURL: http://llm-small.lan:8080/v1
+    model: Qwen3-8B
+    concurrency: 2
+    jobs: [chat]
+```
+
+A queued job runs on the first model with a free slot among those
+serving it, so the second model above takes chat questions while the
+first reviews. A job claimed by a model runs to the end on it; the jobs
+page names it. Every job enabled (chat needs Zulip) must be served by some
+model.
+
+agent-nexus asks each model for its context window before giving it a
+job. A model whose server does not answer takes no job and is asked
+again, backing off up to five minutes; its jobs go to the other models
+serving them, or wait. `agent-nexus review -model <name>` reviews with a
+given model; by default, with the first one serving reviews.
 
 ## Review modes
 

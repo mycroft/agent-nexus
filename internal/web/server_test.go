@@ -48,7 +48,7 @@ func enqueue(t *testing.T, store *jobs.Store, forge string, pr int) int64 {
 
 func claim(t *testing.T, store *jobs.Store, want int64) {
 	t.Helper()
-	got, err := store.Claim(context.Background())
+	got, err := store.Claim(context.Background(), jobs.ClaimSpec{})
 	if err != nil || got == nil || got.ID != want {
 		t.Fatalf("Claim = %+v, %v, want job %d", got, err, want)
 	}
