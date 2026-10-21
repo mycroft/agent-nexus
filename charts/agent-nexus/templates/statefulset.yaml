@@ -14,10 +14,14 @@ spec:
       {{- include "agent-nexus.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- if or .Values.podAnnotations .Values.mcp.servers }}
+      {{- if or .Values.podAnnotations .Values.mcp.servers .Values.models }}
       annotations:
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.models }}
+        # Rolls the pod when the models configuration changes.
+        checksum/models: {{ include "agent-nexus.modelsConfig" . | sha256sum }}
         {{- end }}
         {{- if .Values.mcp.servers }}
         # Rolls the pod when the MCP configuration changes.
@@ -77,6 +81,15 @@ spec:
               value: {{ join "," . | quote }}
             {{- end }}
             {{- include "agent-nexus.secretEnv" (dict "name" "API_KEYS" "secret" .Values.existingSecret "key" "api-keys") | nindent 12 }}
+            {{- if .Values.models }}
+            - name: MODELS_CONFIG
+              value: /etc/agent-nexus/models/config.yaml
+            {{- range .Values.models }}
+            {{- if .apiKeyKey }}
+            {{- include "agent-nexus.secretEnv" (dict "name" (include "agent-nexus.modelKeyEnv" .name) "secret" $.Values.existingSecret "key" .apiKeyKey) | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- else }}
             - name: LLM_BASE_URL
               value: {{ .Values.llm.baseURL | quote }}
             - name: LLM_MODEL
@@ -94,6 +107,7 @@ spec:
             - name: LLM_REQUEST_TIMEOUT
               value: {{ .Values.llm.requestTimeout | quote }}
             {{- include "agent-nexus.secretEnv" (dict "name" "LLM_API_KEY" "secret" .Values.existingSecret "key" "llm-api-key" "optional" true) | nindent 12 }}
+            {{- end }}
             {{- if .Values.gitea.enabled }}
             - name: GITEA_URL
               value: {{ .Values.gitea.url | quote }}
@@ -163,6 +177,11 @@ spec:
               mountPath: /etc/agent-nexus/mcp
               readOnly: true
             {{- end }}
+            {{- if .Values.models }}
+            - name: models
+              mountPath: /etc/agent-nexus/models
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir:
@@ -171,6 +190,11 @@ spec:
         - name: mcp
           configMap:
             name: {{ include "agent-nexus.fullname" . }}-mcp
+        {{- end }}
+        {{- if .Values.models }}
+        - name: models
+          configMap:
+            name: {{ include "agent-nexus.fullname" . }}-models
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

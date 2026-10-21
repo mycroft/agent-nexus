@@ -104,7 +104,9 @@ At least one forge must be configured.
 
 The `LLM_*` variables configure one model, named `default`. To run jobs
 on several LLMs, `MODELS_CONFIG` names a YAML file listing them instead;
-setting both is an error.
+setting both is an error. The Helm chart renders `models` into it, each
+`apiKeyKey` naming the key of `existingSecret` holding that model's API
+key; leave `llm.baseURL` and `llm.model` empty then.
 
 ```yaml
 models:
@@ -513,8 +515,9 @@ All `/v1` routes but the Zulip webhook require `Authorization: Bearer <api key>`
 
 `UI_ADDR` serves a read-only web UI over the job store:
 
-- the main page shows the running job (turns, peak context, last activity),
-  the queued ones, and the job history;
+- the main page shows the running jobs (model, turns, peak context, last
+  activity), the queued ones, each model's slots in use, and the job
+  history;
 - a job page shows its outcome and every step of the agent transcript:
   prompts, reasoning, tool calls and tool output.
 
@@ -541,17 +544,21 @@ These are served on `METRICS_ADDR` at `/metrics`:
 |---|---|
 | `agent_nexus_jobs{status}` | Unfinished jobs: `queued`, `running`, `posting` |
 | `agent_nexus_job_oldest_seconds{status}` | Age of the oldest unfinished job: since it was queued, or since it started |
-| `agent_nexus_jobs_total{kind,status}` | Finished jobs |
-| `agent_nexus_job_duration_seconds{kind}` | Job run time |
-| `agent_nexus_llm_request_duration_seconds{outcome}` | Chat-completion latency |
-| `agent_nexus_llm_tokens_total{type}` | Prompt and completion tokens |
+| `agent_nexus_jobs_total{kind,status,model}` | Finished jobs |
+| `agent_nexus_job_duration_seconds{kind,model}` | Job run time |
+| `agent_nexus_model_jobs{model}` | Jobs running on each model: the slots in use |
+| `agent_nexus_model_concurrency{model}` | Jobs each model may run at once |
+| `agent_nexus_llm_request_duration_seconds{outcome,model}` | Chat-completion latency |
+| `agent_nexus_llm_tokens_total{type,model}` | Prompt and completion tokens |
 | `agent_nexus_tool_calls_total{tool,outcome}` | Tool calls: `ok`, `error`, `repeat`, `refused` |
 | `agent_nexus_forge_errors_total{forge}` | Failed forge API requests |
 | `agent_nexus_mcp_errors_total{server}` | MCP servers a job could not open |
 
 For example, to alert on a stuck job, compare
 `agent_nexus_job_oldest_seconds{status="running"}` with `JOB_TIMEOUT`,
-which defaults to 30 minutes.
+which defaults to 30 minutes. Queued jobs waiting while
+`agent_nexus_model_jobs` stays at `agent_nexus_model_concurrency` need
+more slots, or another model.
 
 ## Deployment
 
@@ -570,6 +577,7 @@ keys:
 
 - `api-keys` (required)
 - `llm-api-key` (optional)
+- the `apiKeyKey` of each model that has one
 - `gitea-token` (when Gitea is enabled)
 - `github-app-private-key` (when GitHub is enabled)
 - `zulip-bot-api-key` and `zulip-webhook-token` (when Zulip is enabled)

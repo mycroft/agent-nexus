@@ -130,6 +130,36 @@ func TestIndexShowsRunningQueuedAndHistory(t *testing.T) {
 	assertLacks(t, body, "No job running")
 }
 
+func TestModels(t *testing.T) {
+	ctx := context.Background()
+	_, store := newTestUI(t)
+	ui, err := New(store, Options{Models: []Model{{Name: "big", Concurrency: 1}, {Name: "small", Concurrency: 2}}, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := ui.Handler()
+	running := enqueue(t, store, "gitea", 1)
+	if got, err := store.Claim(ctx, jobs.ClaimSpec{Model: "big", Limit: 1}); err != nil || got.ID != running {
+		t.Fatalf("Claim = %+v, %v", got, err)
+	}
+
+	// The live section shows each model's slots, a full one highlighted,
+	// and the model of the running job.
+	_, body := get(t, h, "/fragments/live")
+	assertContains(t, body, `title="1 of 1 slots used"`, `big <span class="tabular-nums text-slate-500 dark:text-slate-400">1/1</span>`,
+		`title="0 of 2 slots used"`, `<dt class="inline">model</dt> <dd class="inline">big</dd>`)
+	if !strings.Contains(body, `border-amber-200 bg-amber-50/70 dark:border-amber-500/25 dark:bg-amber-500/5" title="1 of 1`) {
+		t.Error("the full model is not highlighted")
+	}
+	_, body = get(t, h, fmt.Sprintf("/jobs/%d", running))
+	assertContains(t, body, `Model</dt><dd>big</dd>`)
+
+	// Without models, there is no slot line.
+	h, _ = newTestUI(t)
+	_, body = get(t, h, "/fragments/live")
+	assertLacks(t, body, "Models</span>")
+}
+
 func TestLiveSignalsChanges(t *testing.T) {
 	h, store := newTestUI(t)
 	running := enqueue(t, store, "gitea", 1)

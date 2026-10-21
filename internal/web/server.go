@@ -36,7 +36,16 @@ type Options struct {
 	// ForgeURLs maps forge names ("gitea", "github") to their web roots,
 	// to link pull requests.
 	ForgeURLs map[string]string
-	Logger    *slog.Logger
+	// Models are the models jobs run on, to show how many of their slots
+	// are used.
+	Models []Model
+	Logger *slog.Logger
+}
+
+// Model is a model jobs run on.
+type Model struct {
+	Name        string
+	Concurrency int
 }
 
 // Server renders the UI.
@@ -109,11 +118,22 @@ type page struct {
 type live struct {
 	Active []jobView
 	Queued []jobView
+	Slots  []slotView
 	// Seen lists the shown unfinished jobs and their status; the next
 	// poll sends it back, so the server can tell when the history needs
 	// a refresh.
 	Seen string
 }
+
+// slotView is the use of a model's slots.
+type slotView struct {
+	Name        string
+	Running     int
+	Concurrency int
+}
+
+// Full reports whether the model takes no more jobs for now.
+func (v slotView) Full() bool { return v.Running >= v.Concurrency }
 
 // history is a page of finished and unfinished jobs, newest first.
 type history struct {
@@ -164,6 +184,15 @@ func (s *Server) live(r *http.Request) (live, error) {
 		return live{}, err
 	}
 	l := live{Active: s.views(active), Queued: s.views(queued)}
+	if len(s.opts.Models) > 0 {
+		usage, err := s.store.ModelUsage(ctx)
+		if err != nil {
+			return live{}, err
+		}
+		for _, m := range s.opts.Models {
+			l.Slots = append(l.Slots, slotView{Name: m.Name, Running: usage[m.Name], Concurrency: m.Concurrency})
+		}
+	}
 	// Oldest first: that is the order they run in.
 	for i, j := 0, len(l.Queued)-1; i < j; i, j = i+1, j-1 {
 		l.Queued[i], l.Queued[j] = l.Queued[j], l.Queued[i]
@@ -323,6 +352,7 @@ type jobView struct {
 	// chat conversation.
 	Label        string
 	APIKeyName   string
+	Model        string
 	CreatedAt    time.Time
 	StartedAt    *time.Time
 	FinishedAt   *time.Time
@@ -335,7 +365,7 @@ type jobView struct {
 
 func newJobView(j jobs.JobSummary, forgeURLs map[string]string) jobView {
 	v := jobView{
-		ID: j.ID, Kind: j.Kind, Status: j.Status, APIKeyName: j.APIKeyName,
+		ID: j.ID, Kind: j.Kind, Status: j.Status, APIKeyName: j.APIKeyName, Model: j.Model,
 		CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
 		Attempts: j.Attempts, Error: j.Error, Progress: j.Progress,
 	}

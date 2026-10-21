@@ -45,3 +45,27 @@ func TestActiveJobsCollectorError(t *testing.T) {
 		t.Errorf("Gather error = %v, want the read error", err)
 	}
 }
+
+func TestModelSlotsCollector(t *testing.T) {
+	c := NewModelSlotsCollector(func(context.Context) ([]ModelSlots, error) {
+		return []ModelSlots{{Model: "big", Running: 1, Concurrency: 1}, {Model: "small", Concurrency: 2}}, nil
+	})
+	want := `
+# HELP agent_nexus_model_concurrency Jobs each model may run at once.
+# TYPE agent_nexus_model_concurrency gauge
+agent_nexus_model_concurrency{model="big"} 1
+agent_nexus_model_concurrency{model="small"} 2
+# HELP agent_nexus_model_jobs Jobs running on each model.
+# TYPE agent_nexus_model_jobs gauge
+agent_nexus_model_jobs{model="big"} 1
+agent_nexus_model_jobs{model="small"} 0
+`
+	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {
+		t.Error(err)
+	}
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(NewModelSlotsCollector(func(context.Context) ([]ModelSlots, error) { return nil, errors.New("db down") }))
+	if _, err := reg.Gather(); err == nil || !strings.Contains(err.Error(), "db down") {
+		t.Errorf("Gather error = %v, want the read error", err)
+	}
+}

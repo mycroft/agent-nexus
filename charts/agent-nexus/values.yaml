@@ -12,6 +12,7 @@ fullnameOverride: ""
 # creates it. Keys:
 #   api-keys                "name=key,name=key", keys of 32+ characters (required)
 #   llm-api-key             bearer token for the LLM server (optional)
+#   <models[].apiKeyKey>    API key of that model (optional)
 #   gitea-token             token of the Gitea bot (when gitea.enabled)
 #   github-app-private-key  PEM private key of the GitHub App (when github.enabled)
 #   zulip-bot-api-key       API key of the Zulip bot (when zulip.enabled)
@@ -34,6 +35,26 @@ llm:
   concurrency: 1
   # One completion, including the time llama-server keeps it queued.
   requestTimeout: 10m
+
+# Several models instead of llm, rendered as the MODELS_CONFIG file (see
+# README.md, "Models"). Leave llm.baseURL and llm.model empty with it. A
+# queued job runs on the first model with a free slot among those serving
+# it.
+models: []
+#  # Lowercase letters and digits.
+#  - name: qwen
+#    baseURL: https://llm-api.example.com/v1
+#    model: Qwen3-32B
+#    # Key of existingSecret holding its API key (optional).
+#    apiKeyKey: llm-api-key
+#    # Jobs running on it at once; match llama-server's --parallel.
+#    concurrency: 1
+#    # The jobs it serves: review, discussion, chat. Default: all.
+#    jobs: [review, discussion, chat]
+#    # As in llm: 0 asks /props, 0 keeps the server's default.
+#    contextTokens: 0
+#    thinkingBudget: 0
+#    requestTimeout: 10m
 
 gitea:
   enabled: false

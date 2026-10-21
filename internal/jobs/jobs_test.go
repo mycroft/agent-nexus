@@ -160,6 +160,9 @@ func TestClaimByModel(t *testing.T) {
 	if got, err := s.Claim(ctx, big); err != nil || got != nil {
 		t.Fatalf("Claim(big) = %+v, %v; want nothing at its limit", got, err)
 	}
+	if usage, err := s.ModelUsage(ctx); err != nil || usage["big"] != 1 || usage["small"] != 1 || len(usage) != 2 {
+		t.Errorf("ModelUsage = %v, %v", usage, err)
+	}
 	if _, err := s.Finish(ctx, review1.ID, Succeeded, nil, ""); err != nil {
 		t.Fatal(err)
 	}

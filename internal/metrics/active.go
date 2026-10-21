@@ -70,3 +70,51 @@ func (c *activeJobsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.oldest, prometheus.GaugeValue, age, status)
 	}
 }
+
+// ModelSlots is the use of one model's slots.
+type ModelSlots struct {
+	Model       string
+	Running     int
+	Concurrency int
+}
+
+type modelSlotsCollector struct {
+	read        func(context.Context) ([]ModelSlots, error)
+	running     *prometheus.Desc
+	concurrency *prometheus.Desc
+}
+
+// NewModelSlotsCollector exports each model's slots, read at each scrape:
+// agent_nexus_model_jobs (its running jobs) and
+// agent_nexus_model_concurrency (how many it may run at once). Jobs that
+// wait while the first stays at the second need another model or more
+// slots.
+func NewModelSlotsCollector(read func(context.Context) ([]ModelSlots, error)) prometheus.Collector {
+	return &modelSlotsCollector{
+		read: read,
+		running: prometheus.NewDesc("agent_nexus_model_jobs",
+			"Jobs running on each model.", []string{"model"}, nil),
+		concurrency: prometheus.NewDesc("agent_nexus_model_concurrency",
+			"Jobs each model may run at once.", []string{"model"}, nil),
+	}
+}
+
+func (c *modelSlotsCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.running
+	ch <- c.concurrency
+}
+
+func (c *modelSlotsCollector) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	slots, err := c.read(ctx)
+	if err != nil {
+		slog.Warn("read model slots for metrics", "error", err)
+		ch <- prometheus.NewInvalidMetric(c.running, err)
+		return
+	}
+	for _, s := range slots {
+		ch <- prometheus.MustNewConstMetric(c.running, prometheus.GaugeValue, float64(s.Running), s.Model)
+		ch <- prometheus.MustNewConstMetric(c.concurrency, prometheus.GaugeValue, float64(s.Concurrency), s.Model)
+	}
+}

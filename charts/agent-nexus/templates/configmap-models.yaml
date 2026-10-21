@@ -1,0 +1,11 @@
+{{- if .Values.models }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-nexus.fullname" . }}-models
+  labels:
+    {{- include "agent-nexus.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- include "agent-nexus.modelsConfig" . | nindent 4 }}
+{{- end }}

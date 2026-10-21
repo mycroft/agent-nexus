@@ -97,6 +97,7 @@ type Client struct {
 	baseURL        *url.URL
 	apiKey         string
 	model          string
+	name           string
 	thinkingBudget int
 }
 
@@ -106,6 +107,12 @@ type Option func(*Client)
 // WithHTTPClient replaces the HTTP wrapper, primarily for tests.
 func WithHTTPClient(client *httpclient.Client) Option {
 	return func(c *Client) { c.httpClient = client }
+}
+
+// WithName names the client's model in its metrics: the name of its
+// configuration, not the upstream identifier.
+func WithName(name string) Option {
+	return func(c *Client) { c.name = name }
 }
 
 // WithThinkingBudget caps the model's reasoning per request, in tokens
@@ -192,10 +199,10 @@ func (c *Client) Complete(ctx context.Context, r Request) (Completion, error) {
 	if err != nil {
 		outcome = "error"
 	}
-	metrics.LLMRequestDuration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
+	metrics.LLMRequestDuration.WithLabelValues(outcome, c.name).Observe(time.Since(start).Seconds())
 	if err == nil {
-		metrics.LLMTokensTotal.WithLabelValues("prompt").Add(float64(completion.Usage.PromptTokens))
-		metrics.LLMTokensTotal.WithLabelValues("completion").Add(float64(completion.Usage.CompletionTokens))
+		metrics.LLMTokensTotal.WithLabelValues("prompt", c.name).Add(float64(completion.Usage.PromptTokens))
+		metrics.LLMTokensTotal.WithLabelValues("completion", c.name).Add(float64(completion.Usage.CompletionTokens))
 	}
 	return completion, err
 }

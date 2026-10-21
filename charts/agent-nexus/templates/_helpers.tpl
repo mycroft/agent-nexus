@@ -53,8 +53,12 @@ Fail early on settings agent-nexus would refuse at startup.
 {{- if not .Values.existingSecret }}
 {{- fail "existingSecret is required: a Secret with at least the api-keys key" }}
 {{- end }}
-{{- if not (and .Values.llm.baseURL .Values.llm.model) }}
-{{- fail "llm.baseURL and llm.model are required" }}
+{{- if .Values.models }}
+{{- if or .Values.llm.baseURL .Values.llm.model }}
+{{- fail "set either models or llm.baseURL and llm.model, not both" }}
+{{- end }}
+{{- else if not (and .Values.llm.baseURL .Values.llm.model) }}
+{{- fail "llm.baseURL and llm.model are required, unless models lists the models" }}
 {{- end }}
 {{- if not .Values.allowedOwners }}
 {{- fail "allowedOwners must list at least one repository owner" }}
@@ -127,4 +131,33 @@ bearer token from MCP_TOKEN_<NAME>, set from that key of existingSecret.
 
 {{- define "agent-nexus.mcpTokenEnv" -}}
 MCP_TOKEN_{{ upper . }}
+{{- end }}
+
+{{/*
+models as the MODELS_CONFIG file. A model with an apiKeyKey reads its API
+key from LLM_API_KEY_<NAME>, set from that key of existingSecret.
+*/}}
+{{- define "agent-nexus.modelsConfig" -}}
+{{- $models := list }}
+{{- range .Values.models }}
+{{- if not (and .name (regexMatch "^[a-z][a-z0-9]{0,15}$" .name)) }}
+{{- fail (printf "models name %v: want a lowercase letter, then up to 15 lowercase letters or digits" .name) }}
+{{- end }}
+{{- $model := dict "name" .name }}
+{{- with .baseURL }}{{ $_ := set $model "baseURL" . }}{{ end }}
+{{- with .model }}{{ $_ := set $model "model" . }}{{ end }}
+{{- with .concurrency }}{{ $_ := set $model "concurrency" . }}{{ end }}
+{{- with .jobs }}{{ $_ := set $model "jobs" . }}{{ end }}
+{{- if hasKey . "local" }}{{ $_ := set $model "local" .local }}{{ end }}
+{{- with .contextTokens }}{{ $_ := set $model "contextTokens" . }}{{ end }}
+{{- with .thinkingBudget }}{{ $_ := set $model "thinkingBudget" . }}{{ end }}
+{{- with .requestTimeout }}{{ $_ := set $model "requestTimeout" . }}{{ end }}
+{{- if .apiKeyKey }}{{ $_ := set $model "apiKeyEnv" (include "agent-nexus.modelKeyEnv" .name) }}{{ end }}
+{{- $models = append $models $model }}
+{{- end }}
+{{- toYaml (dict "models" $models) }}
+{{- end }}
+
+{{- define "agent-nexus.modelKeyEnv" -}}
+LLM_API_KEY_{{ upper . }}
 {{- end }}

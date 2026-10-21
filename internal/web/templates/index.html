@@ -26,6 +26,9 @@
       <div><dt class="inline">job</dt> <dd class="inline font-mono">#{{.ID}}</dd></div>
       <div><dt class="inline">turns</dt> <dd class="inline tabular-nums">{{.Progress.Turns}}</dd></div>
       <div><dt class="inline">peak context</dt> <dd class="inline tabular-nums">{{tokens .Progress.PeakPromptTokens}}</dd></div>
+      {{- with .Model}}
+      <div><dt class="inline">model</dt> <dd class="inline">{{.}}</dd></div>
+      {{- end}}
       {{- with .Progress.LastActivity}}
       <div><dt class="inline">last activity</dt> <dd class="inline">{{ago .}} ago</dd></div>
       {{- end}}
@@ -49,6 +52,16 @@
     {{- end}}
   </div>
   {{- end}}
+  {{- with .Slots}}
+  <div class="flex flex-wrap items-center gap-2 text-sm">
+    <span class="text-slate-500 dark:text-slate-400">Models</span>
+    {{- range .}}
+    <span class="rounded-lg border px-2 py-0.5 text-xs {{if .Full}}border-amber-200 bg-amber-50/70 dark:border-amber-500/25 dark:bg-amber-500/5{{else}}border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900{{end}}" title="{{.Running}} of {{.Concurrency}} slots used">
+      {{.Name}} <span class="tabular-nums text-slate-500 dark:text-slate-400">{{.Running}}/{{.Concurrency}}</span>
+    </span>
+    {{- end}}
+  </div>
+  {{- end}}
 </section>
 {{- end}}
 
@@ -64,6 +77,7 @@
           <th class="px-4 py-2">Job</th>
           <th class="hidden px-4 py-2 sm:table-cell">Pull request</th>
           <th class="px-4 py-2">Status</th>
+          <th class="hidden px-4 py-2 xl:table-cell">Model</th>
           <th class="hidden px-4 py-2 lg:table-cell">Outcome</th>
           <th class="hidden px-4 py-2 text-right xl:table-cell">Turns</th>
           <th class="hidden px-4 py-2 text-right xl:table-cell">Peak context</th>
@@ -112,6 +126,7 @@
   </td>
   <td class="hidden whitespace-nowrap px-4 py-2 sm:table-cell">{{if .Repo}}{{.Repo}}<span class="text-slate-400">#{{.PR}}</span>{{else}}{{.Label}}{{end}}</td>
   <td class="whitespace-nowrap px-4 py-2">{{template "status-pill" .Status}}</td>
+  <td class="hidden whitespace-nowrap px-4 py-2 text-slate-600 xl:table-cell dark:text-slate-400">{{.Model}}</td>
   <td class="hidden max-w-56 truncate px-4 py-2 text-slate-600 lg:table-cell dark:text-slate-400" title="{{.Error}}">{{.Outcome}}</td>
   <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums xl:table-cell">{{with .Progress.Turns}}{{.}}{{end}}</td>
   <td class="hidden whitespace-nowrap px-4 py-2 text-right tabular-nums xl:table-cell">{{with .Progress.PeakPromptTokens}}{{tokens .}}{{end}}</td>

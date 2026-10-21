@@ -191,7 +191,8 @@ const probeTimeout = time.Minute
 
 // newLLM returns the client of model m.
 func newLLM(m models.Model) (*llm.Client, error) {
-	client, err := llm.New(m.BaseURL, m.APIKey(), m.Model, m.RequestTimeout, llm.WithThinkingBudget(m.ThinkingBudget))
+	client, err := llm.New(m.BaseURL, m.APIKey(), m.Model, m.RequestTimeout,
+		llm.WithName(m.Name), llm.WithThinkingBudget(m.ThinkingBudget))
 	if err != nil {
 		return nil, fmt.Errorf("model %s: %w", m.Name, err)
 	}
@@ -326,6 +327,18 @@ func serve() error {
 	}
 	queue := jobs.NewQueue(store, jobModels, cfg.JobTimeout, cfg.TranscriptRetention, log)
 	a.reviewer.Enqueue = queue.Enqueue
+	var uiModels []web.Model
+	for _, m := range cfg.Models {
+		uiModels = append(uiModels, web.Model{Name: m.Name, Concurrency: m.Concurrency})
+	}
+	prometheus.MustRegister(metrics.NewModelSlotsCollector(func(ctx context.Context) ([]metrics.ModelSlots, error) {
+		usage, err := store.ModelUsage(ctx)
+		out := make([]metrics.ModelSlots, 0, len(uiModels))
+		for _, m := range uiModels {
+			out = append(out, metrics.ModelSlots{Model: m.Name, Running: usage[m.Name], Concurrency: m.Concurrency})
+		}
+		return out, err
+	}))
 
 	api := &server.Server{
 		Queue: queue, Forges: a.forges, AllowedOwners: cfg.AllowedOwners, Keys: keys,
@@ -347,7 +360,7 @@ func serve() error {
 	for _, f := range a.forges {
 		forgeURLs[f.Name()] = f.ServerURL()
 	}
-	ui, err := web.New(store, web.Options{Version: version, ForgeURLs: forgeURLs, Logger: log})
+	ui, err := web.New(store, web.Options{Version: version, ForgeURLs: forgeURLs, Models: uiModels, Logger: log})
 	if err != nil {
 		return err
 	}

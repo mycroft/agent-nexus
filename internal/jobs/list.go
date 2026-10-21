@@ -192,6 +192,28 @@ func (s *Store) Active(ctx context.Context) ([]ActiveStat, error) {
 	return out, nil
 }
 
+// ModelUsage counts the jobs running on each model: the slots they use.
+func (s *Store) ModelUsage(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT model, COUNT(*) FROM jobs WHERE status = 'running' GROUP BY model`)
+	if err != nil {
+		return nil, fmt.Errorf("count jobs by model: %w", err)
+	}
+	defer rows.Close()
+	usage := map[string]int{}
+	for rows.Next() {
+		var model string
+		var n int
+		if err := rows.Scan(&model, &n); err != nil {
+			return nil, fmt.Errorf("scan jobs by model: %w", err)
+		}
+		usage[model] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count jobs by model: %w", err)
+	}
+	return usage, nil
+}
+
 // ParseStatus validates a status name.
 func ParseStatus(s string) (Status, error) {
 	switch st := Status(s); st {

@@ -1,0 +1,24 @@
+# Several models instead of llm, for CI (helm lint, kubeconform).
+existingSecret: agent-nexus
+models:
+  - name: big
+    baseURL: https://llm.example.com/v1
+    model: big-model
+    apiKeyKey: llm-api-key
+    contextTokens: 131072
+    thinkingBudget: 6144
+    requestTimeout: 15m
+  - name: small
+    baseURL: http://llm-small.example.com:8080/v1
+    model: small-model
+    concurrency: 2
+    jobs: [chat, discussion]
+gitea:
+  enabled: true
+  url: https://gitea.example.com
+zulip:
+  enabled: true
+  url: https://zulip.example.com
+  botEmail: agent-nexus-bot@zulip.example.com
+allowedOwners:
+  - mycroft

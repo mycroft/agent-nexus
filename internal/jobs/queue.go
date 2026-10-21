@@ -303,8 +303,8 @@ func (q *Queue) process(ctx context.Context, job *Job, h Handler) {
 	if !updated {
 		status = Superseded
 	}
-	metrics.JobsTotal.WithLabelValues(job.Kind, string(status)).Inc()
-	metrics.JobDuration.WithLabelValues(job.Kind).Observe(time.Since(start).Seconds())
+	metrics.JobsTotal.WithLabelValues(job.Kind, string(status), job.Model).Inc()
+	metrics.JobDuration.WithLabelValues(job.Kind, job.Model).Observe(time.Since(start).Seconds())
 	if status == Failed {
 		log.ErrorContext(ctx, "job failed", "error", errMsg, "duration", time.Since(start))
 		return
