@@ -69,6 +69,8 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadRunner(t *testing.T) {
 	setBase(t)
+	// CI runners name themselves in RUNNER_NAME too.
+	t.Setenv("RUNNER_NAME", "")
 	c, err := Load()
 	if host, _ := os.Hostname(); err != nil || c.RunnerName != host || c.ControllerURL != "" {
 		t.Errorf("runner: %q, %q, %v; want the host name by default", c.RunnerName, c.ControllerURL, err)
