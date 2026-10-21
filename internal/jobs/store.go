@@ -3,8 +3,10 @@ package jobs
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +39,10 @@ const (
 // typically because a newer job superseded it.
 var ErrNotRunning = errors.New("job is no longer running")
 
+// ErrLeaseLost is returned for a write whose lease no longer holds the
+// job: the job finished, or its lease expired.
+var ErrLeaseLost = errors.New("job lease lost")
+
 // ErrNotFound is returned for an unknown job ID.
 var ErrNotFound = errors.New("job not found")
 
@@ -54,7 +60,13 @@ type Job struct {
 	Attempts   int             `json:"attempts"`
 	APIKeyName string          `json:"api_key_name,omitempty"`
 	// Model is the model the job ran on, set when it is claimed.
-	Model      string     `json:"model,omitempty"`
+	Model string `json:"model,omitempty"`
+	// Runner names who runs the job: empty for the controller's own
+	// workers.
+	Runner string `json:"runner,omitempty"`
+	// Lease is the token of the claim holding the job, set by Claim.
+	// Every write of the holder carries it.
+	Lease      string     `json:"-"`
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
@@ -166,7 +178,7 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 const jobColumns = `id, kind, group_key, dedupe_key, status, payload, checkpoint, result, error,
-	attempts, api_key_name, model, created_at, started_at, finished_at`
+	attempts, api_key_name, model, runner, COALESCE(lease, ''), created_at, started_at, finished_at`
 
 // Enqueue inserts a job unless a live job (queued, running, posting or
 // succeeded) has the same dedupe key, in which case that job is returned
@@ -249,23 +261,41 @@ type ClaimSpec struct {
 	Limit int
 	// Kinds are the job kinds the claimer can run.
 	Kinds []string
+	// Runner names the claimer: empty for the controller's own workers.
+	Runner string
+	// LeaseTTL, if positive, is how long the lease lasts unless renewed:
+	// a runner's. The controller's own leases last until it restarts.
+	LeaseTTL time.Duration
 }
 
-// Claim starts the oldest queued job spec allows, and returns it, or nil
-// when no job can start. A job waits while another job of its group is
-// running or posting, so jobs about one subject never run concurrently.
+// Claim starts the oldest queued job spec allows, and returns it with its
+// lease, or nil when no job can start. A job waits while another job of
+// its group is running, posting or still held by its worker, so jobs about
+// one subject never run concurrently.
 //
-// A job with a checkpoint only has its result left to post, without the
-// model: it is claimed as posting, outside the model's limit, and keeps
-// the model that drafted it.
+// A model's limit counts the jobs it holds, superseded ones included
+// until their worker lets go. A job with a checkpoint only has its result
+// left to post, without the model: it is claimed as posting, outside the
+// model's limit, and keeps the model that drafted it.
 func (s *Store) Claim(ctx context.Context, spec ClaimSpec) (*Job, error) {
-	args := []any{formatTime(s.now()), spec.Model}
+	lease, err := newLease()
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	var until any
+	if spec.LeaseTTL > 0 {
+		until = formatTime(now.Add(spec.LeaseTTL))
+	}
+	args := []any{formatTime(now), spec.Model, spec.Runner, lease, until}
 	query := `UPDATE jobs
 		SET status = CASE WHEN checkpoint IS NULL THEN 'running' ELSE 'posting' END,
 			started_at = ?, attempts = attempts + 1,
-			model = CASE WHEN checkpoint IS NULL THEN ? ELSE model END
+			model = CASE WHEN checkpoint IS NULL THEN ? ELSE model END,
+			runner = ?, lease = ?, lease_until = ?
 		WHERE id = (SELECT q.id FROM jobs q WHERE q.status = 'queued'
-			AND NOT EXISTS (SELECT 1 FROM jobs b WHERE b.group_key = q.group_key AND b.status IN ('running', 'posting'))`
+			AND NOT EXISTS (SELECT 1 FROM jobs b WHERE b.group_key = q.group_key
+				AND (b.status IN ('running', 'posting') OR b.lease IS NOT NULL))`
 	if len(spec.Kinds) > 0 {
 		query += ` AND q.kind IN (` + placeholders(len(spec.Kinds)) + `)`
 		for _, k := range spec.Kinds {
@@ -274,7 +304,7 @@ func (s *Store) Claim(ctx context.Context, spec ClaimSpec) (*Job, error) {
 	}
 	if spec.Limit > 0 {
 		query += ` AND (q.checkpoint IS NOT NULL OR
-			(SELECT COUNT(*) FROM jobs r WHERE r.status = 'running' AND r.model = ?) < ?)`
+			(SELECT COUNT(*) FROM jobs r WHERE r.model = ? AND ` + holdsSlot + `) < ?)`
 		args = append(args, spec.Model, spec.Limit)
 	}
 	query += ` ORDER BY q.id LIMIT 1) RETURNING ` + jobColumns
@@ -288,12 +318,26 @@ func (s *Store) Claim(ctx context.Context, spec ClaimSpec) (*Job, error) {
 	return &job, nil
 }
 
+// holdsSlot selects, in table r, the jobs using a slot of their model:
+// held by a worker, and not only posting.
+const holdsSlot = `r.lease IS NOT NULL AND r.status != 'posting'`
+
+// newLease returns a random claim token.
+func newLease() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate job lease: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // Checkpoint stores data on a running job and moves it to posting. A job
 // recovered after a crash keeps its checkpoint, so its handler can resume
-// from it instead of redoing the work.
-func (s *Store) Checkpoint(ctx context.Context, id int64, data []byte) error {
+// from it instead of redoing the work. It returns ErrNotRunning if the job
+// was superseded meanwhile, or lease no longer holds it.
+func (s *Store) Checkpoint(ctx context.Context, id int64, lease string, data []byte) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET checkpoint = ?, status = 'posting'
-		WHERE id = ? AND status IN ('running', 'posting')`, data, id)
+		WHERE id = ? AND lease = ? AND status IN ('running', 'posting')`, data, id, lease)
 	if err != nil {
 		return fmt.Errorf("checkpoint job %d: %w", id, err)
 	}
@@ -303,31 +347,94 @@ func (s *Store) Checkpoint(ctx context.Context, id int64, data []byte) error {
 	return nil
 }
 
-// Finish records a job's final state. It does nothing (and returns false)
-// if the job was already finished, e.g. superseded while running.
-func (s *Store) Finish(ctx context.Context, id int64, status Status, result []byte, errMsg string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, result = ?, error = ?, finished_at = ?
-		WHERE id = ? AND status IN ('running', 'posting')`,
-		string(status), result, errMsg, formatTime(s.now()), id)
+// Finish records a job's final state and releases its lease. It records
+// nothing (and returns false) if the job was already finished, e.g.
+// superseded while running, and returns ErrLeaseLost if lease no longer
+// holds it.
+func (s *Store) Finish(ctx context.Context, id int64, lease string, status Status, result []byte, errMsg string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, result = ?, error = ?, finished_at = ?,
+			lease = NULL, lease_until = NULL
+		WHERE id = ? AND lease = ? AND status IN ('running', 'posting')`,
+		string(status), result, errMsg, formatTime(s.now()), id, lease)
 	if err != nil {
 		return false, fmt.Errorf("finish job %d: %w", id, err)
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n, _ := res.RowsAffected(); n > 0 {
+		return true, nil
+	}
+	// Superseded meanwhile: the worker only lets go of the job.
+	res, err = s.db.ExecContext(ctx, `UPDATE jobs SET lease = NULL, lease_until = NULL WHERE id = ? AND lease = ?`, id, lease)
+	if err != nil {
+		return false, fmt.Errorf("release job %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, ErrLeaseLost
+	}
+	return false, nil
 }
 
-// Recover requeues jobs left running or posting by a previous process,
-// and fails those that already used maxAttempts.
-func (s *Store) Recover(ctx context.Context, maxAttempts int) (int64, int64, error) {
-	failed, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = 'failed', finished_at = ?,
+// Recover runs at the controller's startup. It requeues the jobs its own
+// workers left running or posting, fails those that already used
+// maxAttempts, and releases the jobs they held. Runners' leases are
+// extended by grace, so a runner can renew them after the restart.
+func (s *Store) Recover(ctx context.Context, maxAttempts int, grace time.Duration) (int64, int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin recover: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	failed, err := tx.ExecContext(ctx, `UPDATE jobs SET status = 'failed', finished_at = ?,
 		error = 'interrupted too many times'
-		WHERE status IN ('running', 'posting') AND attempts >= ?`, formatTime(s.now()), maxAttempts)
+		WHERE status IN ('running', 'posting') AND lease_until IS NULL AND attempts >= ?`, formatTime(s.now()), maxAttempts)
 	if err != nil {
 		return 0, 0, fmt.Errorf("fail interrupted jobs: %w", err)
 	}
-	requeued, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = 'queued' WHERE status IN ('running', 'posting')`)
+	requeued, err := tx.ExecContext(ctx, `UPDATE jobs SET status = 'queued'
+		WHERE status IN ('running', 'posting') AND lease_until IS NULL`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("requeue interrupted jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET lease = NULL WHERE lease IS NOT NULL AND lease_until IS NULL`); err != nil {
+		return 0, 0, fmt.Errorf("release interrupted jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET lease_until = MAX(lease_until, ?) WHERE lease_until IS NOT NULL`,
+		formatTime(s.now().Add(grace))); err != nil {
+		return 0, 0, fmt.Errorf("extend runner leases: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit recover: %w", err)
+	}
+	r, _ := requeued.RowsAffected()
+	f, _ := failed.RowsAffected()
+	return r, f, nil
+}
+
+// Reap takes back the jobs of runners whose lease expired: it requeues
+// those left running or posting, or fails them once they used
+// maxAttempts, and releases the others.
+func (s *Store) Reap(ctx context.Context, maxAttempts int) (int64, int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin reap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	now := formatTime(s.now())
+	failed, err := tx.ExecContext(ctx, `UPDATE jobs SET status = 'failed', finished_at = ?,
+		error = 'its runner stopped answering too many times'
+		WHERE status IN ('running', 'posting') AND lease_until < ? AND attempts >= ?`, now, now, maxAttempts)
+	if err != nil {
+		return 0, 0, fmt.Errorf("fail abandoned jobs: %w", err)
+	}
+	requeued, err := tx.ExecContext(ctx, `UPDATE jobs SET status = 'queued'
+		WHERE status IN ('running', 'posting') AND lease_until < ?`, now)
+	if err != nil {
+		return 0, 0, fmt.Errorf("requeue abandoned jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET lease = NULL, lease_until = NULL WHERE lease_until < ?`, now); err != nil {
+		return 0, 0, fmt.Errorf("release abandoned jobs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit reap: %w", err)
 	}
 	r, _ := requeued.RowsAffected()
 	f, _ := failed.RowsAffected()
@@ -346,14 +453,19 @@ func (s *Store) Get(ctx context.Context, id int64) (Job, error) {
 	return job, nil
 }
 
-// AddStep appends a transcript step to a job.
-func (s *Store) AddStep(ctx context.Context, id int64, st Step) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO job_steps
+// AddStep appends a transcript step to a job held by lease. It returns
+// ErrLeaseLost once lease no longer holds the job.
+func (s *Store) AddStep(ctx context.Context, id int64, lease string, st Step) error {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO job_steps
 		(job_id, seq, role, tool_name, content, prompt_tokens, completion_tokens, created_at)
-		VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM job_steps WHERE job_id = ?), ?, ?, ?, ?, ?, ?)`,
-		id, id, st.Role, st.ToolName, st.Content, st.PromptTokens, st.CompletionTokens, formatTime(s.now()))
+		SELECT ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM job_steps WHERE job_id = ?), ?, ?, ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM jobs WHERE id = ? AND lease = ?)`,
+		id, id, st.Role, st.ToolName, st.Content, st.PromptTokens, st.CompletionTokens, formatTime(s.now()), id, lease)
 	if err != nil {
 		return fmt.Errorf("add step to job %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrLeaseLost
 	}
 	return nil
 }
@@ -421,7 +533,7 @@ func scanJob(row rowScanner) (Job, error) {
 		checkpoint, result []byte
 	)
 	err := row.Scan(&j.ID, &j.Kind, &j.GroupKey, &j.DedupeKey, &status, &j.Payload, &checkpoint, &result,
-		&j.Error, &j.Attempts, &j.APIKeyName, &j.Model, &created, &started, &finished)
+		&j.Error, &j.Attempts, &j.APIKeyName, &j.Model, &j.Runner, &j.Lease, &created, &started, &finished)
 	if err != nil {
 		return Job{}, err
 	}

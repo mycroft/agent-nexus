@@ -21,6 +21,16 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+// leaseOf returns the lease holding job id.
+func leaseOf(t *testing.T, s *Store, id int64) string {
+	t.Helper()
+	j, err := s.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j.Lease
+}
+
 func newJob(sha string) NewJob {
 	return NewJob{Kind: "k", GroupKey: "g#1", DedupeKey: "g#1@" + sha, APIKeyName: "test", Payload: map[string]string{"sha": sha}}
 }
@@ -55,10 +65,10 @@ func TestEnqueueDedupeAndSupersede(t *testing.T) {
 		t.Errorf("a status = %s, want superseded", got.Status)
 	}
 	// The superseded worker can neither checkpoint nor overwrite the state.
-	if err := s.Checkpoint(ctx, a.ID, []byte(`{}`)); !errors.Is(err, ErrNotRunning) {
+	if err := s.Checkpoint(ctx, a.ID, leaseOf(t, s, a.ID), []byte(`{}`)); !errors.Is(err, ErrNotRunning) {
 		t.Errorf("Checkpoint on superseded job = %v, want ErrNotRunning", err)
 	}
-	if updated, err := s.Finish(ctx, a.ID, Failed, nil, "cancelled"); err != nil || updated {
+	if updated, err := s.Finish(ctx, a.ID, leaseOf(t, s, a.ID), Failed, nil, "cancelled"); err != nil || updated {
 		t.Errorf("Finish on superseded job = %v, %v; want no update", updated, err)
 	}
 
@@ -66,7 +76,7 @@ func TestEnqueueDedupeAndSupersede(t *testing.T) {
 	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Finish(ctx, b.ID, Failed, nil, "boom"); err != nil {
+	if _, err := s.Finish(ctx, b.ID, leaseOf(t, s, b.ID), Failed, nil, "boom"); err != nil {
 		t.Fatal(err)
 	}
 	retry, created, _, err := s.Enqueue(ctx, newJob("b"))
@@ -78,7 +88,7 @@ func TestEnqueueDedupeAndSupersede(t *testing.T) {
 	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Finish(ctx, retry.ID, Succeeded, []byte(`{"ok":true}`), ""); err != nil {
+	if _, err := s.Finish(ctx, retry.ID, leaseOf(t, s, retry.ID), Succeeded, []byte(`{"ok":true}`), ""); err != nil {
 		t.Fatal(err)
 	}
 	again, created, _, err := s.Enqueue(ctx, newJob("b"))
@@ -96,14 +106,14 @@ func TestRecover(t *testing.T) {
 	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Checkpoint(ctx, posting.ID, []byte(`{"draft":1}`)); err != nil {
+	if err := s.Checkpoint(ctx, posting.ID, leaseOf(t, s, posting.ID), []byte(`{"draft":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
 		t.Fatal(err)
 	}
 
-	requeued, failed, err := s.Recover(ctx, 3)
+	requeued, failed, err := s.Recover(ctx, 3, time.Minute)
 	if err != nil || requeued != 2 || failed != 0 {
 		t.Fatalf("Recover = %d, %d, %v", requeued, failed, err)
 	}
@@ -119,7 +129,7 @@ func TestRecover(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, _, err := s.Recover(ctx, 3); err != nil {
+		if _, _, err := s.Recover(ctx, 3, time.Minute); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -163,7 +173,7 @@ func TestClaimByModel(t *testing.T) {
 	if usage, err := s.ModelUsage(ctx); err != nil || usage["big"] != 1 || usage["small"] != 1 || len(usage) != 2 {
 		t.Errorf("ModelUsage = %v, %v", usage, err)
 	}
-	if _, err := s.Finish(ctx, review1.ID, Succeeded, nil, ""); err != nil {
+	if _, err := s.Finish(ctx, review1.ID, leaseOf(t, s, review1.ID), Succeeded, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.Claim(ctx, big); err != nil || got == nil || got.ID != review2.ID {
@@ -179,10 +189,10 @@ func TestClaimCheckpointedJob(t *testing.T) {
 	if _, err := s.Claim(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Checkpoint(ctx, drafted.ID, []byte(`{"draft":1}`)); err != nil {
+	if err := s.Checkpoint(ctx, drafted.ID, leaseOf(t, s, drafted.ID), []byte(`{"draft":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Recover(ctx, 3); err != nil {
+	if _, _, err := s.Recover(ctx, 3, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	busy, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "b", DedupeKey: "b", Payload: 2})
@@ -202,12 +212,164 @@ func TestClaimCheckpointedJob(t *testing.T) {
 	}
 }
 
+func TestLeaseFencing(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	j, _, _, _ := s.Enqueue(ctx, newJob("a"))
+	claimed, err := s.Claim(ctx, ClaimSpec{Runner: "r1", LeaseTTL: time.Minute})
+	if err != nil || claimed.Lease == "" || claimed.Runner != "r1" {
+		t.Fatalf("Claim = %+v, %v", claimed, err)
+	}
+	// Only the holder of the lease writes to the job.
+	if err := s.AddStep(ctx, j.ID, "stale", Step{Role: "user"}); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("AddStep with a stale lease = %v, want ErrLeaseLost", err)
+	}
+	if err := s.Checkpoint(ctx, j.ID, "stale", []byte(`{}`)); !errors.Is(err, ErrNotRunning) {
+		t.Errorf("Checkpoint with a stale lease = %v, want ErrNotRunning", err)
+	}
+	if _, err := s.Finish(ctx, j.ID, "stale", Succeeded, nil, ""); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Finish with a stale lease = %v, want ErrLeaseLost", err)
+	}
+	if err := s.AddStep(ctx, j.ID, claimed.Lease, Step{Role: "user"}); err != nil {
+		t.Error(err)
+	}
+	if updated, err := s.Finish(ctx, j.ID, claimed.Lease, Succeeded, nil, ""); err != nil || !updated {
+		t.Errorf("Finish = %v, %v", updated, err)
+	}
+	// Finishing released the lease: the worker can no longer write.
+	if err := s.AddStep(ctx, j.ID, claimed.Lease, Step{Role: "user"}); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("AddStep after Finish = %v, want ErrLeaseLost", err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.Lease != "" || got.Runner != "r1" {
+		t.Errorf("finished job = %+v, want released, still naming its runner", got)
+	}
+}
+
+func TestSupersededJobKeepsItsSlot(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	spec := ClaimSpec{Model: "m", Limit: 1}
+	old, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "pr1", DedupeKey: "pr1@a", Payload: 1})
+	if _, err := s.Claim(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	other, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "pr2", DedupeKey: "pr2@a", Payload: 2})
+	newer, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "pr1", DedupeKey: "pr1@b", Payload: 3})
+	if got, _ := s.Get(ctx, old.ID); got.Status != Superseded {
+		t.Fatalf("old job = %s, want superseded", got.Status)
+	}
+
+	// Its worker has not let go yet: the old job still holds the model's
+	// slot, and its group.
+	if got, err := s.Claim(ctx, spec); err != nil || got != nil {
+		t.Fatalf("Claim = %+v, %v; want nothing while the old job is held", got, err)
+	}
+	if usage, _ := s.ModelUsage(ctx); usage["m"] != 1 {
+		t.Errorf("ModelUsage = %v, want the held job counted", usage)
+	}
+	if got, err := s.Claim(ctx, ClaimSpec{Model: "n"}); err != nil || got == nil || got.ID != other.ID {
+		t.Fatalf("Claim(n) = %+v, %v; want the other group's job, not the newer commit", got, err)
+	}
+	if updated, err := s.Finish(ctx, old.ID, leaseOf(t, s, old.ID), Failed, nil, "cancelled"); err != nil || updated {
+		t.Fatalf("Finish of the superseded job = %v, %v; want a release only", updated, err)
+	}
+	if got, err := s.Claim(ctx, spec); err != nil || got == nil || got.ID != newer.ID {
+		t.Fatalf("Claim = %+v, %v; want the newer commit once the old job is released", got, err)
+	}
+}
+
+func TestReap(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	j, _, _, _ := s.Enqueue(ctx, newJob("a"))
+	local, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "local", DedupeKey: "local", Payload: 1})
+	remote := ClaimSpec{Runner: "r1", LeaseTTL: time.Minute}
+	first, err := s.Claim(ctx, remote)
+	if err != nil || first.ID != j.ID {
+		t.Fatalf("Claim = %+v, %v", first, err)
+	}
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Within the lease, nothing is taken back.
+	now = now.Add(30 * time.Second)
+	if requeued, failed, err := s.Reap(ctx, 3); err != nil || requeued != 0 || failed != 0 {
+		t.Fatalf("Reap within the lease = %d, %d, %v", requeued, failed, err)
+	}
+	// Past it, the runner's job is requeued; the controller's own is not.
+	now = now.Add(time.Minute)
+	if requeued, failed, err := s.Reap(ctx, 3); err != nil || requeued != 1 || failed != 0 {
+		t.Fatalf("Reap = %d, %d, %v", requeued, failed, err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.Status != Queued || got.Lease != "" {
+		t.Errorf("reaped job = %+v, want queued and released", got)
+	}
+	if got, _ := s.Get(ctx, local.ID); got.Status != Running {
+		t.Errorf("local job = %s, want it left running", got.Status)
+	}
+	if _, err := s.Finish(ctx, j.ID, first.Lease, Succeeded, nil, ""); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Finish by the runner that lost the job = %v, want ErrLeaseLost", err)
+	}
+
+	// A job its runners keep losing fails.
+	for range 2 {
+		if _, err := s.Claim(ctx, remote); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(2 * time.Minute)
+		if _, _, err := s.Reap(ctx, 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := s.Get(ctx, j.ID); got.Status != Failed || got.Lease != "" {
+		t.Errorf("job lost 3 times = %+v, want failed and released", got)
+	}
+}
+
+func TestRecoverKeepsRunnerLeases(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	remote, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "a", DedupeKey: "a", Payload: 1})
+	local, _, _, _ := s.Enqueue(ctx, NewJob{Kind: "k", GroupKey: "b", DedupeKey: "b", Payload: 2})
+	if _, err := s.Claim(ctx, ClaimSpec{Runner: "r1", LeaseTTL: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The controller restarts: its own job is requeued, the runner's keeps
+	// running with time to renew its lease.
+	now = now.Add(time.Minute)
+	if requeued, _, err := s.Recover(ctx, 3, 2*time.Minute); err != nil || requeued != 1 {
+		t.Fatalf("Recover = %d, %v", requeued, err)
+	}
+	if got, _ := s.Get(ctx, local.ID); got.Status != Queued || got.Lease != "" {
+		t.Errorf("local job = %+v, want queued and released", got)
+	}
+	now = now.Add(time.Minute)
+	if requeued, _, err := s.Reap(ctx, 3); err != nil || requeued != 0 {
+		t.Errorf("Reap after the restart = %d, %v; want the runner's lease extended", requeued, err)
+	}
+	if got, _ := s.Get(ctx, remote.ID); got.Status != Running || got.Lease == "" {
+		t.Errorf("runner's job = %+v, want it still held", got)
+	}
+}
+
 func TestStepsAndPrune(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	j, _, _, _ := s.Enqueue(ctx, newJob("a"))
+	if _, err := s.Claim(ctx, ClaimSpec{}); err != nil {
+		t.Fatal(err)
+	}
 	for _, st := range []Step{{Role: "user", Content: "u"}, {Role: "assistant", Content: "a", PromptTokens: 7, CompletionTokens: 3}} {
-		if err := s.AddStep(ctx, j.ID, st); err != nil {
+		if err := s.AddStep(ctx, j.ID, leaseOf(t, s, j.ID), st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -414,7 +576,7 @@ func TestClaimSerializesGroups(t *testing.T) {
 	if got, err := s.Claim(ctx, ClaimSpec{}); err != nil || got != nil {
 		t.Fatalf("Claim = %+v, %v; want nothing while pr1 runs", got, err)
 	}
-	if _, err := s.Finish(ctx, first.ID, Succeeded, nil, ""); err != nil {
+	if _, err := s.Finish(ctx, first.ID, leaseOf(t, s, first.ID), Succeeded, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.Claim(ctx, ClaimSpec{}); err != nil || got == nil || got.ID != second.ID {
@@ -469,14 +631,14 @@ func seedJobs(t *testing.T) (*Store, time.Time, [3]int64) {
 		{Role: "assistant", Content: "a", PromptTokens: 100, CompletionTokens: 10},
 		{Role: "assistant", Content: "b", PromptTokens: 300, CompletionTokens: 20},
 	} {
-		if err := s.AddStep(ctx, review.ID, st); err != nil {
+		if err := s.AddStep(ctx, review.ID, leaseOf(t, s, review.ID), st); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got, _ := s.Claim(ctx, ClaimSpec{}); got.ID != discussion.ID {
 		t.Fatalf("claimed %d", got.ID)
 	}
-	if _, err := s.Finish(ctx, discussion.ID, Skipped, nil, ""); err != nil {
+	if _, err := s.Finish(ctx, discussion.ID, leaseOf(t, s, discussion.ID), Skipped, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	return s, start, [3]int64{review.ID, discussion.ID, queued.ID}

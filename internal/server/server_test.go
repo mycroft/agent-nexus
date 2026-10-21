@@ -300,10 +300,11 @@ func TestForcedPREvent(t *testing.T) {
 	ctx := context.Background()
 	_, body := post(t, srv, apiKey, event(1, head))
 	first := int64(body["job_id"].(float64))
-	if _, err := store.Claim(ctx, jobs.ClaimSpec{}); err != nil {
+	claimed, err := store.Claim(ctx, jobs.ClaimSpec{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Finish(ctx, first, jobs.Succeeded, nil, ""); err != nil {
+	if _, err := store.Finish(ctx, first, claimed.Lease, jobs.Succeeded, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if code, body := post(t, srv, apiKey, event(1, head)); code != http.StatusOK || body["duplicate"] != true {

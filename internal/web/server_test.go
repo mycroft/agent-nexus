@@ -54,6 +54,16 @@ func claim(t *testing.T, store *jobs.Store, want int64) {
 	}
 }
 
+// leaseOf returns the lease holding job id.
+func leaseOf(t *testing.T, store *jobs.Store, id int64) string {
+	t.Helper()
+	j, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j.Lease
+}
+
 func get(t *testing.T, h http.Handler, path string, cookies ...*http.Cookie) (*http.Response, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -113,10 +123,10 @@ func TestIndexShowsRunningQueuedAndHistory(t *testing.T) {
 	queued := enqueue(t, store, "gitea", 3)
 	claim(t, store, running)
 	claim(t, store, done)
-	if _, err := store.Finish(ctx, done, jobs.Succeeded, []byte(`{"verdict":"approve","event":"approve","findings":1}`), ""); err != nil {
+	if _, err := store.Finish(ctx, done, leaseOf(t, store, done), jobs.Succeeded, []byte(`{"verdict":"approve","event":"approve","findings":1}`), ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddStep(ctx, running, jobs.Step{Role: "assistant", Content: "x", PromptTokens: 12_300}); err != nil {
+	if err := store.AddStep(ctx, running, leaseOf(t, store, running), jobs.Step{Role: "assistant", Content: "x", PromptTokens: 12_300}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -221,7 +231,7 @@ func addSteps(t *testing.T, store *jobs.Store, id int64) {
 		{Role: "assistant", Content: "<reasoning>\nLook at main.go first.\n</reasoning>\nChecking.\n→ read_file({\"path\":\"main.go\"})", PromptTokens: 900, CompletionTokens: 40},
 		{Role: "tool", ToolName: "read_file", Content: "1\tpackage main"},
 	} {
-		if err := store.AddStep(context.Background(), id, st); err != nil {
+		if err := store.AddStep(context.Background(), id, leaseOf(t, store, id), st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -245,7 +255,7 @@ func TestJobPage(t *testing.T) {
 		fmt.Sprintf(`hx-get="/fragments/jobs/%d/steps?after=4"`, id),
 	)
 
-	if _, err := store.Finish(ctx, id, jobs.Failed, nil, "boom"); err != nil {
+	if _, err := store.Finish(ctx, id, leaseOf(t, store, id), jobs.Failed, nil, "boom"); err != nil {
 		t.Fatal(err)
 	}
 	_, body = get(t, h, fmt.Sprintf("/jobs/%d", id))

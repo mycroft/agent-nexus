@@ -23,7 +23,14 @@ const (
 	// maxReadyBackoff caps the wait between two attempts to set up a
 	// model whose LLM is unreachable.
 	maxReadyBackoff = 5 * time.Minute
+	// reapEvery is how often the leases of runners are checked.
+	reapEvery = 15 * time.Second
 )
+
+// LeaseTTL is how long a runner's lease lasts unless renewed. The
+// controller also gives runners that long to renew their leases after it
+// restarts.
+const LeaseTTL = 2 * time.Minute
 
 // Result is a handler's outcome for a job that did not fail.
 type Result struct {
@@ -38,17 +45,30 @@ type Handler interface {
 	Handle(ctx context.Context, job *Job, run *Run) (Result, error)
 }
 
+// Writer persists what a running job records, under its lease: the store
+// itself, or the controller as seen from a runner.
+type Writer interface {
+	AddStep(ctx context.Context, id int64, lease string, st Step) error
+	Checkpoint(ctx context.Context, id int64, lease string, data []byte) error
+}
+
 // Run gives a handler access to its job's persistence.
 type Run struct {
-	store *Store
+	w     Writer
 	id    int64
+	lease string
 	log   *slog.Logger
+}
+
+// NewRun returns the run of job, claimed with its lease, writing to w.
+func NewRun(w Writer, job *Job, log *slog.Logger) *Run {
+	return &Run{w: w, id: job.ID, lease: job.Lease, log: log}
 }
 
 // Record appends a transcript step. Failures are logged, not returned: a
 // missing transcript line must not fail the job.
 func (r *Run) Record(ctx context.Context, st Step) {
-	if err := r.store.AddStep(ctx, r.id, st); err != nil {
+	if err := r.w.AddStep(ctx, r.id, r.lease, st); err != nil {
 		r.log.WarnContext(ctx, "record step", "job", r.id, "error", err)
 	}
 }
@@ -60,7 +80,44 @@ func (r *Run) Checkpoint(ctx context.Context, data any) error {
 	if err != nil {
 		return fmt.Errorf("marshal checkpoint: %w", err)
 	}
-	return r.store.Checkpoint(ctx, r.id, raw)
+	return r.w.Checkpoint(ctx, r.id, r.lease, raw)
+}
+
+// Execute runs job with h, turning a panic into an error. timeout, the
+// bound of ctx, words the error of a job that ran out of time.
+func Execute(ctx context.Context, h Handler, job *Job, run *Run, timeout time.Duration) (res Result, err error) { //nolint:nonamedreturns // needed to convert a handler panic into an error
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("handler panic: %v", p)
+		}
+	}()
+	if h == nil {
+		return Result{}, fmt.Errorf("no handler for job kind %q", job.Kind)
+	}
+	res, err = h.Handle(ctx, job, run)
+	if err == nil && res.Status != Succeeded && res.Status != Skipped && res.Status != Superseded {
+		err = fmt.Errorf("handler returned invalid status %q", res.Status)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("job timed out after %s: %w", timeout, err)
+	}
+	return res, err
+}
+
+// Outcome returns what to store of a handler's return: the final status,
+// the JSON result and the error message.
+func Outcome(res Result, err error) (Status, []byte, string) {
+	if err != nil {
+		return Failed, nil, err.Error()
+	}
+	if res.Data == nil {
+		return res.Status, nil, ""
+	}
+	raw, err := json.Marshal(res.Data)
+	if err != nil {
+		return Failed, nil, fmt.Sprintf("marshal result: %v", err)
+	}
+	return res.Status, raw, ""
 }
 
 // Model is an LLM jobs run on.
@@ -174,7 +231,7 @@ func (q *Queue) Changed() <-chan struct{} {
 // Jobs interrupted by shutdown stay running in the store and are requeued
 // by the next Run.
 func (q *Queue) Run(ctx context.Context) error {
-	requeued, failed, err := q.store.Recover(ctx, maxAttempts)
+	requeued, failed, err := q.store.Recover(ctx, maxAttempts, LeaseTTL)
 	if err != nil {
 		return err
 	}
@@ -189,8 +246,30 @@ func (q *Queue) Run(ctx context.Context) error {
 		}
 	}
 	wg.Go(func() { q.prune(ctx) })
+	wg.Go(func() { q.reap(ctx) })
 	wg.Wait()
 	return nil
+}
+
+// reap takes back the jobs of runners that stopped renewing their lease.
+func (q *Queue) reap(ctx context.Context) {
+	ticker := time.NewTicker(reapEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		requeued, failed, err := q.store.Reap(ctx, maxAttempts)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			q.log.ErrorContext(ctx, "reap runner leases", "error", err)
+		case requeued > 0 || failed > 0:
+			q.log.WarnContext(ctx, "took back jobs from runners that stopped answering", "requeued", requeued, "failed", failed)
+			q.notify()
+		}
+	}
 }
 
 // serve runs the model's workers once its handlers are ready.
@@ -271,64 +350,52 @@ func (q *Queue) process(ctx context.Context, job *Job, h Handler) {
 		q.mu.Unlock()
 	}()
 
-	start := time.Now()
 	log.InfoContext(ctx, "job started")
-	// Jobs of the same group, and of the model, wait for this one: wake
-	// the workers when it ends.
-	defer q.notify()
-	result, err := q.handle(jobCtx, h, job)
+	result, err := Execute(jobCtx, h, job, NewRun(q.store, job, q.log), q.timeout)
 	if ctx.Err() != nil {
+		// Jobs of the same group, and of the model, wait for it: on
+		// shutdown, they wait for the restart.
 		log.WarnContext(ctx, "job interrupted by shutdown; it will be requeued on restart")
 		return
 	}
-
+	status, raw, errMsg := Outcome(result, err)
 	// The job context may be cancelled (superseded or timed out); the
 	// final state must still be written.
-	writeCtx := context.WithoutCancel(ctx)
-	status, data, errMsg := result.Status, result.Data, ""
-	if err != nil {
-		status, data, errMsg = Failed, nil, err.Error()
-	}
-	var raw []byte
-	if data != nil {
-		if raw, err = json.Marshal(data); err != nil {
-			status, raw, errMsg = Failed, nil, fmt.Sprintf("marshal result: %v", err)
-		}
-	}
-	updated, err := q.store.Finish(writeCtx, job.ID, status, raw, errMsg)
-	if err != nil {
+	if _, err := q.Finish(context.WithoutCancel(ctx), job.ID, job.Lease, status, raw, errMsg); err != nil {
 		log.ErrorContext(ctx, "finish job", "error", err)
-		return
 	}
+}
+
+// Finish records the final state of a job held by lease (see
+// Store.Finish), counts it, and wakes the workers: jobs of its group and
+// of its model may wait for it. It returns the status the job ended with,
+// Superseded if a newer job replaced it meanwhile.
+func (q *Queue) Finish(ctx context.Context, id int64, lease string, status Status, result []byte, errMsg string) (Status, error) {
+	job, err := q.store.Get(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	updated, err := q.store.Finish(ctx, id, lease, status, result, errMsg)
+	if err != nil {
+		return "", err
+	}
+	defer q.notify()
 	if !updated {
 		status = Superseded
 	}
+	log := q.log.With("job", id, "kind", job.Kind, "model", job.Model, "runner", job.Runner, "attempt", job.Attempts)
+	var duration time.Duration
+	if job.StartedAt != nil {
+		duration = q.store.now().Sub(*job.StartedAt)
+	}
 	metrics.JobsTotal.WithLabelValues(job.Kind, string(status), job.Model).Inc()
-	metrics.JobDuration.WithLabelValues(job.Kind, job.Model).Observe(time.Since(start).Seconds())
+	metrics.JobDuration.WithLabelValues(job.Kind, job.Model).Observe(duration.Seconds())
 	if status == Failed {
-		log.ErrorContext(ctx, "job failed", "error", errMsg, "duration", time.Since(start))
-		return
+		log.ErrorContext(ctx, "job failed", "error", errMsg, "duration", duration)
+	} else {
+		log.InfoContext(ctx, "job finished", "status", status, "duration", duration)
 	}
-	log.InfoContext(ctx, "job finished", "status", status, "duration", time.Since(start))
-}
-
-func (q *Queue) handle(ctx context.Context, h Handler, job *Job) (res Result, err error) { //nolint:nonamedreturns // needed to convert a handler panic into an error
-	defer func() {
-		if p := recover(); p != nil {
-			err = fmt.Errorf("handler panic: %v", p)
-		}
-	}()
-	if h == nil {
-		return Result{}, fmt.Errorf("no handler for job kind %q", job.Kind)
-	}
-	res, err = h.Handle(ctx, job, &Run{store: q.store, id: job.ID, log: q.log})
-	if err == nil && res.Status != Succeeded && res.Status != Skipped && res.Status != Superseded {
-		err = fmt.Errorf("handler returned invalid status %q", res.Status)
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		err = fmt.Errorf("job timed out after %s: %w", q.timeout, err)
-	}
-	return res, err
+	return status, nil
 }
 
 func (q *Queue) prune(ctx context.Context) {

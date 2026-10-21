@@ -378,12 +378,13 @@ func TestHandleThroughQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Claim(ctx, jobs.ClaimSpec{}); err != nil {
+	claimed, err := store.Claim(ctx, jobs.ClaimSpec{})
+	if err != nil {
 		t.Fatal(err)
 	}
 	checkpoint := Draft{HeadSHA: f.remote.HeadSHA, Review: forge.NewReview{CommitSHA: f.remote.HeadSHA, Body: "from checkpoint " + marker(f.remote.HeadSHA)}}
 	raw, _ := json.Marshal(checkpoint)
-	if err := store.Checkpoint(ctx, resumed.ID, raw); err != nil {
+	if err := store.Checkpoint(ctx, resumed.ID, claimed.Lease, raw); err != nil {
 		t.Fatal(err)
 	}
 

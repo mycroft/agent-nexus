@@ -22,6 +22,8 @@ The flow is event → job → handler → agent → forge.
   - Each job has a `dedupe_key` (one live job per commit) and a `group_key` (a newer commit supersedes older jobs, and cancels them if they are running).
   - `Claim(ClaimSpec)` starts the oldest queued job of the kinds a model serves while the model is under its `Concurrency`, and records the model on the job. A `jobs.Model` without `Handlers` only takes jobs from runners. `Handlers` is retried until the model's LLM answers, so a model that is down stalls only its own jobs.
   - `Checkpoint` stores the drafted review and moves the job to `posting`, so crash recovery re-posts instead of re-running the LLM. A requeued job with a checkpoint is claimed as `posting`, outside the model's limit.
+  - Each claim takes a random lease (`Job.Lease`). `AddStep`, `Checkpoint` and `Finish` carry it, and `Finish` releases it even for a superseded job. A model's slots and a group's exclusivity count the jobs whose lease is held, so a superseded job keeps them until its worker lets go. `jobs.Execute`, `Outcome`, `NewRun` and `Queue.Finish` are what a worker needs, wherever it runs.
+  - The controller's own leases have no expiry: `Recover` releases them at startup. A runner's lease (`LeaseTTL`) expires unless renewed, and `Reap` then takes the job back.
   - A schema change is a new numbered file in `internal/jobs/migrations/`. Files apply in name order and are recorded in `schema_migrations`.
 - **`internal/review`:** the `pr_review` handler.
   - `Draft` gathers the PR, diff and base-branch `AGENTS.md`, runs the agent, then makes one final schema-constrained call.
@@ -63,6 +65,7 @@ The flow is event → job → handler → agent → forge.
 
 - **Model input never becomes a git option.** It goes after `-e`, `--end-of-options` or `--`, or inside a `sha:path` with a path checked by `CleanPath`. Revisions are always SHAs that agent-nexus chose.
 - **Forge POSTs are never retried by the HTTP client.** A failed Gitea review can leave a pending review behind. `Post` deletes it and checks for the marker before trying again.
+- **A worker writes to a job only through its claim's lease.** Never add a store write on a started job that does not check the lease: a worker that lost the job (superseded and released, or reaped) must not touch the new attempt.
 - **Repository guidance comes from the base commit,** never the PR head.
 - **A review marker names the commit, or for a forced review also the job** (`reviewMarker`). A forced review (a review request, or an `@agent-nexus review` comment, which `requestReview` handles without the LLM) is therefore never mistaken for the commit's earlier review, and is still posted only once.
 - **Chat answers never write to a forge,** and only name repositories of `ALLOWED_OWNERS`. Only the bot's own ✅ reaction marks a Zulip question answered.

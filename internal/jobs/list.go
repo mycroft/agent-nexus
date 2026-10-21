@@ -192,9 +192,9 @@ func (s *Store) Active(ctx context.Context) ([]ActiveStat, error) {
 	return out, nil
 }
 
-// ModelUsage counts the jobs running on each model: the slots they use.
+// ModelUsage counts the jobs holding a slot of each model (see Claim).
 func (s *Store) ModelUsage(ctx context.Context) (map[string]int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT model, COUNT(*) FROM jobs WHERE status = 'running' GROUP BY model`)
+	rows, err := s.db.QueryContext(ctx, `SELECT model, COUNT(*) FROM jobs r WHERE `+holdsSlot+` GROUP BY model`)
 	if err != nil {
 		return nil, fmt.Errorf("count jobs by model: %w", err)
 	}
